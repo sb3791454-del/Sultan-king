@@ -21,29 +21,41 @@ async function startServer() {
     console.warn('Telegram bot initialization in background:', err?.message);
   });
 
-  // --- TELEGRAM WEBHOOK ENDPOINT ---
-  app.post('/api/telegram-webhook', async (req, res) => {
-    try {
-      if (req.body) {
-        // Asynchronously process Telegram update
-        TelegramBotService.handleUpdate(req.body);
-      }
-      res.status(200).json({ ok: true });
-    } catch (e: any) {
-      console.error('Webhook error:', e?.message);
-      res.status(200).json({ ok: true }); // Always return 200 to Telegram
-    }
+  // --- HEALTH CHECK ENDPOINT ---
+  app.get('/api/health', (_req, res) => {
+    res.json({
+      status: 'ok',
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+      bot: TelegramBotService.getStatus(),
+    });
   });
 
+  // --- TELEGRAM WEBHOOK ENDPOINTS ---
+  // Standard routes supported: /api/telegram-webhook and /telegram/webhook
+  const webhookHandler = async (req: express.Request, res: express.Response) => {
+    try {
+      const secretHeader = (req.headers['x-telegram-bot-api-secret-token'] as string) || undefined;
+      const result = await TelegramBotService.handleWebhookUpdate(req.body, secretHeader);
+      res.status(200).json({ ok: result.ok, status: result.status });
+    } catch (e: any) {
+      console.error('Webhook endpoint error:', e?.message);
+      res.status(200).json({ ok: true }); // Always return 200 to Telegram to prevent retry floods
+    }
+  };
+
+  app.post('/api/telegram-webhook', webhookHandler);
+  app.post('/telegram/webhook', webhookHandler);
+
   // --- BOT MANAGEMENT API ---
-  app.get('/api/bot/status', (req, res) => {
+  app.get('/api/bot/status', (_req, res) => {
     res.json({
       status: 'ok',
       bot: TelegramBotService.getStatus(),
     });
   });
 
-  app.get('/api/bot/logs', (req, res) => {
+  app.get('/api/bot/logs', (_req, res) => {
     res.json({
       status: 'ok',
       logs: TelegramBotService.getLogs(),
@@ -60,8 +72,40 @@ async function startServer() {
     res.json({ status: 'ok', bot: TelegramBotService.getStatus() });
   });
 
+  app.post('/api/bot/set-webhook', async (req, res) => {
+    try {
+      const { url, secret } = req.body;
+      const targetUrl = url || process.env.APP_URL;
+      if (!targetUrl) {
+        return res.status(400).json({ error: 'Webhook URL or APP_URL environment variable is required' });
+      }
+      const outcome = await TelegramBotService.registerWebhook(targetUrl, secret || process.env.TELEGRAM_WEBHOOK_SECRET);
+      res.json(outcome);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message });
+    }
+  });
+
+  app.post('/api/bot/delete-webhook', async (_req, res) => {
+    try {
+      const outcome = await TelegramBotService.deleteWebhook();
+      res.json(outcome);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message });
+    }
+  });
+
+  app.get('/api/bot/webhook-info', async (_req, res) => {
+    try {
+      const info = await TelegramBotService.getWebhookInfo();
+      res.json({ status: 'ok', info });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message });
+    }
+  });
+
   // --- TRADING ENGINE API ---
-  app.get('/api/trading/overview', async (req, res) => {
+  app.get('/api/trading/overview', async (_req, res) => {
     try {
       const overview = await TradingEngine.getMarketOverview();
       res.json({ status: 'ok', overview });
@@ -75,8 +119,20 @@ async function startServer() {
       const symbol = (req.query.symbol as string) || 'BTCUSDT';
       const timeframe = ((req.query.timeframe as string) || '1h') as '15m' | '1h' | '4h' | '1d';
       const normalized = TradingEngine.normalizeSymbol(symbol);
-      const candles = await TradingEngine.fetchCandles(normalized.binancePair, timeframe, 100);
-      res.json({ status: 'ok', symbol: normalized.symbolKey, timeframe, candles });
+      const snapshot = await TradingEngine.fetchCandlesWithSnapshot(normalized.binancePair, timeframe, 100);
+      res.json({
+        status: 'ok',
+        symbol: normalized.symbolKey,
+        timeframe,
+        candles: snapshot.data,
+        provenance: {
+          source: snapshot.source,
+          provider: snapshot.provider,
+          latencyMs: snapshot.latencyMs,
+          latestCandleTimestamp: snapshot.latestCandleTimestamp,
+          isStale: snapshot.isStale,
+        },
+      });
     } catch (e: any) {
       res.status(500).json({ error: e?.message });
     }
@@ -87,22 +143,28 @@ async function startServer() {
       const { symbol = 'XAUUSD', timeframe = '1h', query } = req.body;
       const setup = await TelegramBotService.generateSetupForSymbol(symbol, timeframe, query);
       const normalized = TradingEngine.normalizeSymbol(symbol);
-      const candles = await TradingEngine.fetchCandles(normalized.binancePair, timeframe, 100);
+      const snapshot = await TradingEngine.fetchCandlesWithSnapshot(normalized.binancePair, timeframe, 100);
       const tickerStats = await TradingEngine.fetch24hTicker(normalized.binancePair);
-      const indicators = TradingEngine.calculateIndicators(candles, tickerStats);
+      const indicators = TradingEngine.calculateIndicators(snapshot.data, tickerStats);
 
       res.json({
         status: 'ok',
         setup,
         indicators,
-        candles: candles.slice(-50),
+        candles: snapshot.data.slice(-50),
+        provenance: {
+          source: snapshot.source,
+          provider: snapshot.provider,
+          latencyMs: snapshot.latencyMs,
+          latestCandleTimestamp: snapshot.latestCandleTimestamp,
+        },
       });
     } catch (e: any) {
       res.status(500).json({ error: e?.message });
     }
   });
 
-  app.get('/api/trading/scan', async (req, res) => {
+  app.get('/api/trading/scan', async (_req, res) => {
     try {
       const assets = ['XAUUSD', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'NEARUSDT'];
       const scans = await Promise.all(
@@ -129,7 +191,6 @@ async function startServer() {
     }
   });
 
-  // --- ADVANCED QUANT & SMC API ENDPOINTS ---
   app.get('/api/trading/smc', async (req, res) => {
     try {
       const symbol = (req.query.symbol as string) || 'BTCUSDT';
@@ -143,7 +204,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/trading/sentiment', async (req, res) => {
+  app.get('/api/trading/sentiment', async (_req, res) => {
     try {
       const sentiment = await TradingEngine.fetchFearAndGreed();
       res.json({ status: 'ok', sentiment });
@@ -152,7 +213,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/trading/funding', async (req, res) => {
+  app.get('/api/trading/funding', async (_req, res) => {
     try {
       const funding = await TradingEngine.fetchFundingRates();
       res.json({ status: 'ok', funding });
@@ -161,7 +222,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/trading/calendar', (req, res) => {
+  app.get('/api/trading/calendar', (_req, res) => {
     try {
       const calendar = TradingEngine.getEconomicCalendar();
       res.json({ status: 'ok', calendar });
@@ -198,22 +259,6 @@ async function startServer() {
       const timeframe = ((req.query.timeframe as string) || '1h') as '15m' | '1h' | '4h' | '1d';
       const diagnostics = await TradingEngine.generateDiagnosticsReport(symbol, timeframe);
       res.json({ status: 'ok', diagnostics });
-    } catch (e: any) {
-      res.status(500).json({ error: e?.message });
-    }
-  });
-
-  // --- DOCUMENTATION DOWNLOAD ENDPOINT ---
-  app.get('/api/download-spec', (req, res) => {
-    try {
-      const format = (req.query.format as string) === 'md' ? 'md' : 'doc';
-      const filename = format === 'md' ? 'AI_TRADING_BOT_SYSTEM_DOCUMENTATION.md' : 'AI_TRADING_BOT_SYSTEM_DOCUMENTATION.doc';
-      const filePath = path.join(process.cwd(), 'public', filename);
-      const mimeType = format === 'md' ? 'text/markdown' : 'application/msword';
-
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('Content-Type', mimeType);
-      res.sendFile(filePath);
     } catch (e: any) {
       res.status(500).json({ error: e?.message });
     }
@@ -257,7 +302,7 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

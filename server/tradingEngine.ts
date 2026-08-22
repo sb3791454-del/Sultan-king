@@ -1,4 +1,5 @@
 import { Candle, IndicatorData, TradeSetup, MarketTicker, SmartMoneyConcepts, FearAndGreedData, FundingRateData, EconomicEvent, BacktestResult, MTFMatrixData, DiagnosticsReport } from '../src/types';
+import { MarketDataProviderService, MarketDataError, MarketErrorType, VerifiedMarketSnapshot } from './marketDataProvider';
 
 // Supported assets list
 export const SUPPORTED_SYMBOLS: Record<string, { name: string; binancePair: string; assetType: 'CRYPTO' | 'COMMODITY' | 'FOREX'; category: string; decimals: number }> = {
@@ -6,7 +7,7 @@ export const SUPPORTED_SYMBOLS: Record<string, { name: string; binancePair: stri
   'XAUUSD': { name: 'Gold Spot / USD', binancePair: 'PAXGUSDT', assetType: 'COMMODITY', category: 'Metals', decimals: 2 },
   'GOLD': { name: 'Gold Spot / USD', binancePair: 'PAXGUSDT', assetType: 'COMMODITY', category: 'Metals', decimals: 2 },
   'PAXG': { name: 'PAX Gold / USD', binancePair: 'PAXGUSDT', assetType: 'COMMODITY', category: 'Metals', decimals: 2 },
-  'SILVER': { name: 'Silver / USD', binancePair: 'PAXGUSDT', assetType: 'COMMODITY', category: 'Metals', decimals: 3 }, // Proxy tracking
+  'SILVER': { name: 'Silver / USD', binancePair: 'PAXGUSDT', assetType: 'COMMODITY', category: 'Metals', decimals: 3 },
   // Crypto Majors
   'BTC': { name: 'Bitcoin / USDT', binancePair: 'BTCUSDT', assetType: 'CRYPTO', category: 'Layer 1', decimals: 2 },
   'BTCUSDT': { name: 'Bitcoin / USDT', binancePair: 'BTCUSDT', assetType: 'CRYPTO', category: 'Layer 1', decimals: 2 },
@@ -37,7 +38,7 @@ export class TradingEngine {
    * Normalizes input symbol (e.g., "gold", "gold usdt", "xau/usd", "btc", "sol")
    */
   public static normalizeSymbol(rawInput: string): { symbolKey: string; binancePair: string; name: string; assetType: 'CRYPTO' | 'COMMODITY' | 'FOREX'; decimals: number } {
-    const cleaned = rawInput.trim().toUpperCase().replace(/[\/\s\-_]/g, '');
+    const cleaned = (rawInput || '').trim().toUpperCase().replace(/[\/\s\-_]/g, '');
     
     // Direct matches
     if (SUPPORTED_SYMBOLS[cleaned]) {
@@ -61,89 +62,39 @@ export class TradingEngine {
       return { symbolKey: 'SOLUSDT', binancePair: 'SOLUSDT', name: 'Solana / USDT', assetType: 'CRYPTO', decimals: 2 };
     }
 
-    // Default fallback to pair + USDT or BTC
+    // Default fallback to pair + USDT
     const pair = cleaned.endsWith('USDT') ? cleaned : `${cleaned}USDT`;
     return { symbolKey: pair, binancePair: pair, name: `${cleaned} / USDT`, assetType: 'CRYPTO', decimals: 2 };
   }
 
   /**
-   * Fetches real-time multi-timeframe candlestick data from public feeds with timeout fallback
+   * Fetches real-time candlestick data using verified market data provider abstraction
+   * Invariant: Real mode NEVER produces synthetic candles. Throws MarketDataError if unavailable.
    */
   public static async fetchCandles(pair: string, interval: '15m' | '1h' | '4h' | '1d' = '1h', limit = 100): Promise<Candle[]> {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
-
-      const response = await fetch(`https://api.binance.com/api/v3/klines?symbol=${pair}&interval=${interval}&limit=${limit}`, {
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`Market feed HTTP ${response.status}`);
-      }
-      const rawData = await response.json();
-      if (!Array.isArray(rawData)) {
-        throw new Error('Invalid candle data array');
-      }
-
-      return rawData.map((item: any[]) => ({
-        time: Number(item[0]),
-        open: parseFloat(item[1]),
-        high: parseFloat(item[2]),
-        low: parseFloat(item[3]),
-        close: parseFloat(item[4]),
-        volume: parseFloat(item[5]),
-      }));
-    } catch (err: any) {
-      console.warn(`Direct fetch failed for ${pair}, using generated data: ${err?.message}`);
-      return this.generateSyntheticCandles(pair, limit);
-    }
+    const snapshot = await MarketDataProviderService.getVerifiedCandles(pair, interval, limit);
+    return snapshot.data;
   }
 
   /**
-   * Fetches 24hr ticker summary for price & volume statistics with timeout fallback
+   * Fetches candlestick data along with verified provenance snapshot metadata
+   */
+  public static async fetchCandlesWithSnapshot(pair: string, interval: '15m' | '1h' | '4h' | '1d' = '1h', limit = 100): Promise<VerifiedMarketSnapshot<Candle[]>> {
+    return await MarketDataProviderService.getVerifiedCandles(pair, interval, limit);
+  }
+
+  /**
+   * Fetches 24hr ticker summary from verified market data providers
    */
   public static async fetch24hTicker(pair: string): Promise<{ price: number; change24h: number; high24h: number; low24h: number; volume24h: number }> {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
-
-      const response = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${pair}`, {
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        const data = await response.json();
-        return {
-          price: parseFloat(data.lastPrice),
-          change24h: parseFloat(data.priceChangePercent),
-          high24h: parseFloat(data.highPrice),
-          low24h: parseFloat(data.lowPrice),
-          volume24h: parseFloat(data.quoteVolume),
-        };
-      }
-    } catch (e) {
-      // Fallback
-    }
-
-    // Default approximation
-    const base = pair.includes('BTC') ? 96500 : pair.includes('ETH') ? 2750 : pair.includes('SOL') ? 185 : pair.includes('PAXG') ? 2930 : pair.includes('XRP') ? 2.45 : 10;
-    return {
-      price: base,
-      change24h: 1.85,
-      high24h: base * 1.025,
-      low24h: base * 0.985,
-      volume24h: 50000000,
-    };
+    const snapshot = await MarketDataProviderService.getVerified24hTicker(pair);
+    return snapshot.data;
   }
 
   /**
-   * Fetches market overview for all top watchlist symbols
+   * Fetches market overview for all top watchlist symbols with verified data only
    */
   public static async getMarketOverview(): Promise<MarketTicker[]> {
-    const list: MarketTicker[] = [];
     const topSymbols = [
       { sym: 'XAUUSD', pair: 'PAXGUSDT', name: 'Gold (XAU/USD)', type: 'COMMODITY' as const, cat: 'Metals' },
       { sym: 'BTCUSDT', pair: 'BTCUSDT', name: 'Bitcoin', type: 'CRYPTO' as const, cat: 'Layer 1' },
@@ -155,10 +106,10 @@ export class TradingEngine {
       { sym: 'NEARUSDT', pair: 'NEARUSDT', name: 'NEAR Protocol', type: 'CRYPTO' as const, cat: 'AI Layer 1' },
     ];
 
-    await Promise.all(
+    const results = await Promise.allSettled(
       topSymbols.map(async (item) => {
         const stats = await this.fetch24hTicker(item.pair);
-        list.push({
+        return {
           symbol: item.sym,
           name: item.name,
           price: stats.price,
@@ -168,9 +119,23 @@ export class TradingEngine {
           volume24h: stats.volume24h,
           assetType: item.type,
           category: item.cat,
-        });
+        };
       })
     );
+
+    const list: MarketTicker[] = [];
+    for (const r of results) {
+      if (r.status === 'fulfilled') {
+        list.push(r.value);
+      }
+    }
+
+    if (list.length === 0) {
+      throw new MarketDataError(
+        MarketErrorType.DATA_UNAVAILABLE,
+        'Unable to fetch verified market overview data from public feeds'
+      );
+    }
 
     return list;
   }
@@ -180,7 +145,7 @@ export class TradingEngine {
    */
   public static calculateIndicators(candles: Candle[], tickerStats?: { change24h: number; high24h: number; low24h: number; volume24h: number }): IndicatorData {
     if (!candles || candles.length === 0) {
-      throw new Error('No candle data provided for indicator calculations');
+      throw new MarketDataError(MarketErrorType.DATA_UNAVAILABLE, 'No candle data provided for indicator calculations');
     }
 
     const closes = candles.map((c) => c.close);
@@ -273,9 +238,9 @@ export class TradingEngine {
     else if (emaTrend === 'BEARISH') bearishScore += 2;
 
     // RSI momentum score
-    if (rsiSignal === 'OVERSOLD') bullishScore += 2.5; // Reversal bounce opportunity
+    if (rsiSignal === 'OVERSOLD') bullishScore += 2.5;
     else if (rsiSignal === 'BULLISH' && rsi14 < 65) bullishScore += 1.5;
-    else if (rsiSignal === 'OVERBOUGHT') bearishScore += 2.5; // Reversal dip opportunity
+    else if (rsiSignal === 'OVERBOUGHT') bearishScore += 2.5;
     else if (rsiSignal === 'BEARISH' && rsi14 > 35) bearishScore += 1.5;
 
     // MACD score
@@ -335,7 +300,6 @@ export class TradingEngine {
       takeProfit2 = this.roundToDecimals(midpointEntry + riskDistanceMid * 2.4, decimals); // 2.4R (Structural target)
       takeProfit3 = this.roundToDecimals(midpointEntry + riskDistanceMid * 3.6, decimals); // 3.6R (Trend expansion)
 
-      // R:R is computed on the central realistic midpoint fill to TP2
       const rr = ((takeProfit2 - midpointEntry) / riskDistanceMid).toFixed(1);
       riskRewardRatio = `1:${rr}`;
       riskPercent = this.roundToDecimals(((midpointEntry - stopLoss) / midpointEntry) * 100, 2);
@@ -445,8 +409,6 @@ export class TradingEngine {
     const ema12 = this.computeEMA(prices, 12);
     const ema26 = this.computeEMA(prices, 26);
     const macdLine = ema12 - ema26;
-    
-    // Approximate signal line
     const signalLine = macdLine * 0.85; 
     const histogram = macdLine - signalLine;
 
@@ -514,7 +476,6 @@ export class TradingEngine {
     const swingHigh = Math.max(...recentHighs);
     const swingLow = Math.min(...recentLows);
 
-    // Simple support and resistance clusters
     const supports = [swingLow, Math.min(...lows.slice(-10))].sort((a, b) => b - a);
     const resistances = [swingHigh, Math.max(...highs.slice(-10))].sort((a, b) => a - b);
 
@@ -527,11 +488,7 @@ export class TradingEngine {
   }
 
   /**
-   * Computes Institutional Smart Money Concepts (SMC):
-   * - Order Blocks (OB)
-   * - Fair Value Gaps (FVG)
-   * - Liquidity Pools (Buy Side / Sell Side)
-   * - Market Structure Shifts (BOS & CHoCH)
+   * Computes Institutional Smart Money Concepts (SMC)
    */
   public static calculateSMC(candles: Candle[]): SmartMoneyConcepts {
     if (candles.length < 10) {
@@ -553,12 +510,11 @@ export class TradingEngine {
     const liquidityPools: SmartMoneyConcepts['liquidityPools'] = [];
     const currentPrice = candles[candles.length - 1].close;
 
-    // 1. Detect Fair Value Gaps (3-candle imbalance pattern)
+    // 1. Detect Fair Value Gaps
     for (let i = 2; i < candles.length; i++) {
       const first = candles[i - 2];
       const current = candles[i];
 
-      // Bullish FVG: Low of candle 3 is greater than High of candle 1
       if (current.low > first.high) {
         const top = current.low;
         const bottom = first.high;
@@ -574,7 +530,6 @@ export class TradingEngine {
         });
       }
 
-      // Bearish FVG: High of candle 3 is lower than Low of candle 1
       if (current.high < first.low) {
         const top = first.low;
         const bottom = current.high;
@@ -591,12 +546,11 @@ export class TradingEngine {
       }
     }
 
-    // 2. Detect Order Blocks (Last opposing candle before strong expansion)
+    // 2. Detect Order Blocks
     for (let i = 3; i < candles.length - 1; i++) {
       const curr = candles[i];
       const next = candles[i + 1];
 
-      // Bullish OB: Bearish candle followed by strong bullish displacement
       if (curr.close < curr.open && next.close > next.open && next.close > curr.high) {
         const displacement = (next.close - curr.low) / curr.low;
         if (displacement > 0.008) {
@@ -610,7 +564,6 @@ export class TradingEngine {
         }
       }
 
-      // Bearish OB: Bullish candle followed by strong bearish displacement
       if (curr.close > curr.open && next.close < next.open && next.close < curr.low) {
         const displacement = (curr.high - next.close) / curr.high;
         if (displacement > 0.008) {
@@ -625,7 +578,7 @@ export class TradingEngine {
       }
     }
 
-    // 3. Detect Liquidity Pools (Clustered highs and lows)
+    // 3. Detect Liquidity Pools
     const highs = candles.map((c) => c.high);
     const lows = candles.map((c) => c.low);
     const recentHighs = highs.slice(-30);
@@ -681,11 +634,15 @@ export class TradingEngine {
   }
 
   /**
-   * Fetches Real-Time Fear & Greed Index from alternative.me (100% Free Public API)
+   * Fetches Real-Time Fear & Greed Index from alternative.me
    */
   public static async fetchFearAndGreed(): Promise<FearAndGreedData> {
     try {
-      const res = await fetch('https://api.alternative.me/fng/?limit=7');
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch('https://api.alternative.me/fng/?limit=7', { signal: controller.signal });
+      clearTimeout(timeoutId);
+
       if (res.ok) {
         const data = await res.json();
         if (data && Array.isArray(data.data) && data.data.length > 0) {
@@ -720,40 +677,37 @@ export class TradingEngine {
         }
       }
     } catch (e: any) {
-      console.warn('Fear & Greed fetch notice:', e?.message);
+      console.warn('Fear & Greed fetch note:', e?.message);
     }
 
-    // Default Fallback
+    // Default neutral state when API is unreachable
     return {
-      score: 64,
-      rating: 'Greed',
+      score: 50,
+      rating: 'Neutral',
       historical7Days: [
-        { date: 'Today', value: 64, rating: 'Greed' },
-        { date: 'Yesterday', value: 62, rating: 'Greed' },
-        { date: '2d ago', value: 58, rating: 'Neutral' },
-        { date: '3d ago', value: 55, rating: 'Neutral' },
-        { date: '4d ago', value: 51, rating: 'Neutral' },
-        { date: '5d ago', value: 48, rating: 'Fear' },
-        { date: '6d ago', value: 44, rating: 'Fear' },
+        { date: 'Today', value: 50, rating: 'Neutral' },
       ],
-      contrarianVerdict: 'Bullish momentum is active. Favor trend-continuation pullbacks over breakout chasing.',
+      contrarianVerdict: 'Market sentiment index temporarily unreachable. Relying strictly on technical indicator confluences.',
       updatedAt: new Date().toISOString(),
     };
   }
 
   /**
-   * Fetches Live Futures Funding Rates, Real Long/Short Ratios & Open Interest from public endpoints
+   * Fetches Live Futures Funding Rates & Open Interest
    */
   public static async fetchFundingRates(): Promise<FundingRateData[]> {
     try {
-      const res = await fetch('https://fapi.binance.com/fapi/v1/premiumIndex');
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const res = await fetch('https://fapi.binance.com/fapi/v1/premiumIndex', { signal: controller.signal });
+      clearTimeout(timeoutId);
+
       if (res.ok) {
         const raw = await res.json();
         if (Array.isArray(raw)) {
           const tracked = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'NEARUSDT'];
           const filtered = raw.filter((item: any) => tracked.includes(item.symbol));
 
-          // Fetch individual live metrics in parallel for each asset
           const results = await Promise.all(
             filtered.map(async (item: any) => {
               const symbol = item.symbol;
@@ -762,8 +716,7 @@ export class TradingEngine {
               const predictedRate = parseFloat(item.predictedRate || '0.0001');
               const markPrice = parseFloat(item.markPrice || '1');
 
-              // Fetch live Open Interest
-              let openInterestUSD = 500000000;
+              let openInterestUSD = 0;
               try {
                 const oiRes = await fetch(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`);
                 if (oiRes.ok) {
@@ -772,13 +725,11 @@ export class TradingEngine {
                     openInterestUSD = Math.round(parseFloat(oiData.openInterest) * markPrice);
                   }
                 }
-              } catch (err) {
-                // Fallback based on asset type
-                openInterestUSD = symbol.includes('BTC') ? 4850000000 : symbol.includes('ETH') ? 2100000000 : 650000000;
+              } catch {
+                openInterestUSD = 0;
               }
 
-              // Fetch live Global Long/Short Account Ratio
-              let longShortRatio = 1.15;
+              let longShortRatio = 1.0;
               try {
                 const lsRes = await fetch(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=5m&limit=1`);
                 if (lsRes.ok) {
@@ -787,16 +738,15 @@ export class TradingEngine {
                     longShortRatio = parseFloat(parseFloat(lsData[0].longShortRatio).toFixed(2));
                   }
                 }
-              } catch (err) {
-                longShortRatio = fundingRate >= 0 ? parseFloat((1.05 + fundingRate * 80).toFixed(2)) : 0.88;
+              } catch {
+                longShortRatio = 1.0;
               }
 
-              // Squeeze risk classification
               let squeezeRisk: FundingRateData['squeezeRisk'] = 'BALANCED';
               if (fundingRate >= 0.0003 || longShortRatio >= 2.1) {
-                squeezeRisk = 'HIGH_LONG_SQUEEZE'; // Overleveraged longs, liquidation trap down
+                squeezeRisk = 'HIGH_LONG_SQUEEZE';
               } else if (fundingRate <= -0.0001 || longShortRatio <= 0.82) {
-                squeezeRisk = 'HIGH_SHORT_SQUEEZE'; // Overcrowded shorts, explosive bounce risk
+                squeezeRisk = 'HIGH_SHORT_SQUEEZE';
               }
 
               return {
@@ -816,21 +766,14 @@ export class TradingEngine {
         }
       }
     } catch (e: any) {
-      console.warn('Funding rate fetch notice:', e?.message);
+      console.warn('Funding rate fetch note:', e?.message);
     }
 
-    // Default Deterministic Fallback if network unavailable
-    return [
-      { symbol: 'BTCUSDT', fundingRate: 0.0001, fundingRatePercent: '0.0100%', predictedRate: 0.000095, openInterestUSD: 4850000000, squeezeRisk: 'BALANCED', longShortRatio: 1.28, nextFundingTime: '00:00 UTC' },
-      { symbol: 'ETHUSDT', fundingRate: 0.000075, fundingRatePercent: '0.0075%', predictedRate: 0.00008, openInterestUSD: 2150000000, squeezeRisk: 'BALANCED', longShortRatio: 1.12, nextFundingTime: '00:00 UTC' },
-      { symbol: 'SOLUSDT', fundingRate: 0.00021, fundingRatePercent: '0.0210%', predictedRate: 0.00019, openInterestUSD: 890000000, squeezeRisk: 'BALANCED', longShortRatio: 1.45, nextFundingTime: '00:00 UTC' },
-      { symbol: 'XRPUSDT', fundingRate: -0.00012, fundingRatePercent: '-0.0120%', predictedRate: -0.00008, openInterestUSD: 430000000, squeezeRisk: 'HIGH_SHORT_SQUEEZE', longShortRatio: 0.79, nextFundingTime: '00:00 UTC' },
-      { symbol: 'BNBUSDT', fundingRate: 0.00005, fundingRatePercent: '0.0050%', predictedRate: 0.00005, openInterestUSD: 380000000, squeezeRisk: 'BALANCED', longShortRatio: 1.05, nextFundingTime: '00:00 UTC' },
-    ];
+    return [];
   }
 
   /**
-   * Returns Live Global High-Impact Economic & Macro Calendar
+   * Returns High-Impact Economic & Macro Calendar
    */
   public static getEconomicCalendar(): EconomicEvent[] {
     return [
@@ -844,6 +787,8 @@ export class TradingEngine {
 
   /**
    * Algorithmic Quantitative Strategy Backtester with Strict Bar-by-Bar Stop-Loss / Take-Profit Simulation
+   * Invariant 1: WIN strictly defined as PnL > 0, LOSS strictly defined as PnL <= 0.
+   * Invariant 2: Conservative single-candle ambiguity resolution: If both SL and TP touched in same candle, assumes SL hit first.
    */
   public static async runBacktest(symbolInput: string, strategyType = 'EMA_SMC_CONFLUENCE', timeframe: '15m' | '1h' | '4h' | '1d' = '1h'): Promise<BacktestResult> {
     const normalized = this.normalizeSymbol(symbolInput);
@@ -856,7 +801,6 @@ export class TradingEngine {
     let peakReturn = 0;
     const tradeLog: BacktestResult['tradeLog'] = [];
 
-    // Run strategy simulation through historical bars with minimum warmup
     const warmup = 35;
     for (let i = warmup; i < candles.length - 8; i += 3) {
       const slice = candles.slice(0, i + 1);
@@ -877,13 +821,11 @@ export class TradingEngine {
         if (smc.fairValueGaps.some((f) => f.type === 'BULLISH_FVG' && !f.mitigated)) signal = 'BUY';
         else if (smc.fairValueGaps.some((f) => f.type === 'BEARISH_FVG' && !f.mitigated)) signal = 'SELL';
       } else {
-        // Default EMA + Momentum Confluence
         if (ema20 > ema50 && rsi > 52 && rsi < 68) signal = 'BUY';
         else if (ema20 < ema50 && rsi < 48 && rsi > 32) signal = 'SELL';
       }
 
       if (signal) {
-        // Define exact trade parameters: 1.5 * ATR stop loss, 2.0 * Risk Take-Profit
         const riskDistance = Math.max(atr14 * 1.5, currentPrice * 0.012);
         const stopLoss = signal === 'BUY' ? currentPrice - riskDistance : currentPrice + riskDistance;
         const takeProfit = signal === 'BUY' ? currentPrice + riskDistance * 2.0 : currentPrice - riskDistance * 2.0;
@@ -892,35 +834,47 @@ export class TradingEngine {
         let resolved = false;
         let pnlPercent = 0;
 
-        // Step forward candle-by-candle up to 8 future bars to test if SL or TP was hit first
         const maxHoldingBars = Math.min(8, candles.length - 1 - i);
         for (let step = 1; step <= maxHoldingBars; step++) {
           const futureCandle = candles[i + step];
 
           if (signal === 'BUY') {
-            if (futureCandle.low <= stopLoss) {
-              // Stop Loss triggered
+            const hitSL = futureCandle.low <= stopLoss;
+            const hitTP = futureCandle.high >= takeProfit;
+
+            if (hitSL && hitTP) {
+              // Ambiguous single-candle breach: strictly assume Stop-Loss was hit first (conservative risk standard)
               exitPrice = stopLoss;
               pnlPercent = -((currentPrice - stopLoss) / currentPrice) * 100;
               resolved = true;
               break;
-            } else if (futureCandle.high >= takeProfit) {
-              // Take profit triggered
+            } else if (hitSL) {
+              exitPrice = stopLoss;
+              pnlPercent = -((currentPrice - stopLoss) / currentPrice) * 100;
+              resolved = true;
+              break;
+            } else if (hitTP) {
               exitPrice = takeProfit;
               pnlPercent = ((takeProfit - currentPrice) / currentPrice) * 100;
               resolved = true;
               break;
             }
           } else {
-            // SELL signal
-            if (futureCandle.high >= stopLoss) {
-              // Stop Loss triggered
+            const hitSL = futureCandle.high >= stopLoss;
+            const hitTP = futureCandle.low <= takeProfit;
+
+            if (hitSL && hitTP) {
+              // Ambiguous single-candle breach: strictly assume Stop-Loss was hit first
               exitPrice = stopLoss;
               pnlPercent = -((stopLoss - currentPrice) / currentPrice) * 100;
               resolved = true;
               break;
-            } else if (futureCandle.low <= takeProfit) {
-              // Take Profit triggered
+            } else if (hitSL) {
+              exitPrice = stopLoss;
+              pnlPercent = -((stopLoss - currentPrice) / currentPrice) * 100;
+              resolved = true;
+              break;
+            } else if (hitTP) {
               exitPrice = takeProfit;
               pnlPercent = ((currentPrice - takeProfit) / currentPrice) * 100;
               resolved = true;
@@ -929,7 +883,6 @@ export class TradingEngine {
           }
         }
 
-        // If not triggered, exit at the closing price of the final holding candle
         if (!resolved) {
           const finalCandle = candles[i + maxHoldingBars];
           exitPrice = finalCandle.close;
@@ -938,7 +891,7 @@ export class TradingEngine {
             : ((currentPrice - exitPrice) / currentPrice) * 100;
         }
 
-        // Mathematically strict WIN vs LOSS: Win strictly when PnL > 0, Loss when PnL <= 0
+        // Strict WIN/LOSS logic
         const isWin = pnlPercent > 0;
         if (isWin) winningTrades++;
         else losingTrades++;
@@ -981,14 +934,13 @@ export class TradingEngine {
   }
 
   /**
-   * Generates a fully transparent, mathematical diagnostics report auditing all raw inputs, formulas, and verified outputs
+   * Generates a transparent mathematical diagnostics report auditing raw inputs, formulas, and verified outputs
    */
   public static async generateDiagnosticsReport(symbolInput: string, timeframe: '15m' | '1h' | '4h' | '1d' = '1h'): Promise<DiagnosticsReport> {
-    const startTime = Date.now();
     const normalized = this.normalizeSymbol(symbolInput);
-    const candles = await this.fetchCandles(normalized.binancePair, timeframe, 100);
+    const candleSnapshot = await this.fetchCandlesWithSnapshot(normalized.binancePair, timeframe, 100);
+    const candles = candleSnapshot.data;
     const ticker = await this.fetch24hTicker(normalized.binancePair);
-    const latency = Date.now() - startTime;
 
     const indicators = this.calculateIndicators(candles, ticker);
     const setup = this.generateQuantitativeSetup(normalized.symbolKey, normalized.assetType, timeframe, indicators, normalized.decimals);
@@ -997,11 +949,19 @@ export class TradingEngine {
     const backtestData = await this.runBacktest(normalized.symbolKey, 'EMA_SMC_CONFLUENCE', timeframe);
 
     const closes = candles.map((c) => c.close);
-    const highs = candles.map((c) => c.high);
-    const lows = candles.map((c) => c.low);
-    const currentPrice = closes[closes.length - 1];
+    const lowerEntry = setup.entryZone[0];
+    const upperEntry = setup.entryZone[1];
+    const midpoint = (lowerEntry + upperEntry) / 2;
+    const worstCaseFill = setup.action === 'LONG' ? upperEntry : lowerEntry;
 
-    // Raw RSI details
+    const riskDistanceMid = Math.abs(midpoint - setup.stopLoss);
+    const riskDistanceWorst = Math.abs(worstCaseFill - setup.stopLoss);
+    const rewardDistanceMid = Math.abs(setup.takeProfit2 - midpoint);
+    const rewardDistanceWorst = Math.abs(setup.takeProfit2 - worstCaseFill);
+
+    const midpointRR = (rewardDistanceMid / Math.max(0.0001, riskDistanceMid)).toFixed(2);
+    const worstCaseRR = (rewardDistanceWorst / Math.max(0.0001, riskDistanceWorst)).toFixed(2);
+
     let gains = 0;
     let losses = 0;
     for (let i = 1; i <= 14; i++) {
@@ -1013,7 +973,6 @@ export class TradingEngine {
     const avgLoss = losses / 14;
     const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
 
-    // True Range samples
     const trValues: number[] = [];
     for (let i = candles.length - 14; i < candles.length; i++) {
       if (i > 0) {
@@ -1024,52 +983,38 @@ export class TradingEngine {
       }
     }
 
-    const lowerEntry = setup.entryZone[0];
-    const upperEntry = setup.entryZone[1];
-    const midpoint = (lowerEntry + upperEntry) / 2;
-    const worstCaseFill = setup.action === 'LONG' ? upperEntry : lowerEntry;
-
-    // Risk and R:R formulas
-    const riskDistanceMid = Math.abs(midpoint - setup.stopLoss);
-    const riskDistanceWorst = Math.abs(worstCaseFill - setup.stopLoss);
-    const rewardDistanceMid = Math.abs(setup.takeProfit2 - midpoint);
-    const rewardDistanceWorst = Math.abs(setup.takeProfit2 - worstCaseFill);
-
-    const midpointRR = (rewardDistanceMid / riskDistanceMid).toFixed(2);
-    const worstCaseRR = (rewardDistanceWorst / riskDistanceWorst).toFixed(2);
-
     return {
       timestamp: new Date().toISOString(),
       symbol: normalized.symbolKey,
       timeframe,
       liveDataSources: [
         {
-          name: 'Binance Public REST API (Klines & 24h Ticker)',
-          endpoint: `https://api.binance.com/api/v3/klines?symbol=${normalized.binancePair}&interval=${timeframe}`,
-          status: 'ONLINE',
-          latencyMs: latency,
-          description: 'Fetches raw OHLCV candlestick bars directly from global crypto exchange books without any proprietary broker markups.',
+          name: candleSnapshot.provider,
+          endpoint: `${candleSnapshot.source}/api/v3/klines?symbol=${normalized.binancePair}&interval=${timeframe}`,
+          status: candleSnapshot.provider.includes('Fallback') ? 'FALLBACK' : 'ONLINE',
+          latencyMs: candleSnapshot.latencyMs,
+          description: `Verified market data feed with zero synthetic substitution. Latest candle: ${new Date(candleSnapshot.latestCandleTimestamp).toISOString()}${candleSnapshot.isStale ? ' (STALE WARNING)' : ''}.`,
         },
         {
           name: 'Binance Futures Premium Index',
           endpoint: 'https://fapi.binance.com/fapi/v1/premiumIndex',
           status: 'ONLINE',
           latencyMs: 140,
-          description: 'Supplies true 8h funding rates, mark prices, and predicted settlement rate schedules.',
+          description: 'Live 8h funding rates, mark prices, and predicted settlement rate schedules.',
         },
         {
           name: 'Binance Global Long/Short Ratio Feed',
           endpoint: `https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${normalized.binancePair}&period=5m`,
           status: 'ONLINE',
           latencyMs: 155,
-          description: 'Live proportion of net long accounts versus net short accounts across Binance Futures market participants.',
+          description: 'Live proportion of net long accounts versus net short accounts.',
         },
         {
           name: 'Alternative.me Fear & Greed API',
           endpoint: 'https://api.alternative.me/fng/?limit=7',
           status: 'ONLINE',
           latencyMs: 180,
-          description: 'Aggregated cross-market sentiment index evaluating social volume, market dominance, and volatility trends.',
+          description: 'Aggregated cross-market sentiment index evaluating social volume and volatility.',
         },
       ],
       rawInputs: {
@@ -1125,18 +1070,18 @@ export class TradingEngine {
           riskPercent: setup.riskPercent,
         },
         takeProfitMath: {
-          tp1Formula: setup.action === 'LONG' ? 'MidpointEntry + 1.2 * RiskDistance (Breakeven Take)' : 'MidpointEntry - 1.2 * RiskDistance',
+          tp1Formula: setup.action === 'LONG' ? 'MidpointEntry + 1.2 * RiskDistance' : 'MidpointEntry - 1.2 * RiskDistance',
           tp1Value: setup.takeProfit1,
           tp1RR: 1.2,
-          tp2Formula: setup.action === 'LONG' ? 'MidpointEntry + 2.4 * RiskDistance (Major Structural Target)' : 'MidpointEntry - 2.4 * RiskDistance',
+          tp2Formula: setup.action === 'LONG' ? 'MidpointEntry + 2.4 * RiskDistance' : 'MidpointEntry - 2.4 * RiskDistance',
           tp2Value: setup.takeProfit2,
           tp2RR: 2.4,
-          tp3Formula: setup.action === 'LONG' ? 'MidpointEntry + 3.6 * RiskDistance (Trend Expansion Runner)' : 'MidpointEntry - 3.6 * RiskDistance',
+          tp3Formula: setup.action === 'LONG' ? 'MidpointEntry + 3.6 * RiskDistance' : 'MidpointEntry - 3.6 * RiskDistance',
           tp3Value: setup.takeProfit3,
           tp3RR: 3.6,
         },
         riskRewardExplanation: {
-          rangeDefinition: `Entry is a bounded execution zone [${lowerEntry}, ${upperEntry}] allowing realistic limit or market fill flexibility.`,
+          rangeDefinition: `Entry is a bounded execution zone [${lowerEntry}, ${upperEntry}] allowing realistic execution.`,
           midpointRRFormula: `(TakeProfit2 - MidpointEntry) / (MidpointEntry - StopLoss) = (${setup.takeProfit2} - ${this.roundToDecimals(midpoint, normalized.decimals)}) / ${this.roundToDecimals(riskDistanceMid, normalized.decimals)}`,
           midpointRR: `1:${midpointRR}`,
           worstCaseRRFormula: `(TakeProfit2 - WorstCaseEntry) / (WorstCaseEntry - StopLoss) = (${setup.takeProfit2} - ${worstCaseFill}) / ${this.roundToDecimals(riskDistanceWorst, normalized.decimals)}`,
@@ -1177,7 +1122,7 @@ export class TradingEngine {
             low: ob.bottom,
             nextClose: candles[ob.candleIndex + 1]?.close || ob.top,
             displacementPercent: this.roundToDecimals(Math.abs((candles[ob.candleIndex + 1]?.close - ob.bottom) / ob.bottom) * 100, 2),
-            ruleSatisfied: `${ob.type} displacement exceeds 0.80% structural threshold with high volume expansion.`,
+            ruleSatisfied: `${ob.type} displacement exceeds 0.80% structural threshold.`,
           })),
           fvgProof: (indicators.smc?.fairValueGaps || []).map((fvg) => ({
             index: fvg.candleIndex,
@@ -1211,9 +1156,9 @@ export class TradingEngine {
         backtestAudit: {
           strategyTested: backtestData.strategyName,
           totalBarsTested: candles.length,
-          tradeExecutionLogic: 'Strict candle-by-candle simulation. For each signal: Stop-Loss set to (Entry - 1.5 * ATR), Take-Profit set to (Entry + 2.0 * Risk). Evaluated forward through future candles until either SL is touched (Loss) or TP is touched (Win).',
-          winLossResolutionFormula: 'PnL% = ((ExitPrice - EntryPrice) / EntryPrice) * 100 for BUY. WIN strictly requires PnL > 0. LOSS strictly requires PnL <= 0. Impossible to report a LOSS with a positive return.',
-          proofOfStrictWinLossIntegrity: `Verified across ${backtestData.totalTrades} historical trades. Total Wins: ${backtestData.winningTrades} (all PnL > 0%). Total Losses: ${backtestData.losingTrades} (all PnL <= 0%). Win Rate: ${backtestData.winRatePercent}%. Profit Factor: ${backtestData.profitFactor}.`,
+          tradeExecutionLogic: 'Strict candle-by-candle simulation with conservative single-bar dual-breach resolution (Stop-Loss priority).',
+          winLossResolutionFormula: 'PnL% = ((ExitPrice - EntryPrice) / EntryPrice) * 100 for BUY. WIN strictly requires PnL > 0. LOSS strictly requires PnL <= 0.',
+          proofOfStrictWinLossIntegrity: `Verified across ${backtestData.totalTrades} historical trades. Wins: ${backtestData.winningTrades}, Losses: ${backtestData.losingTrades}. Win Rate: ${backtestData.winRatePercent}%. Profit Factor: ${backtestData.profitFactor}.`,
           sampleTrades: backtestData.tradeLog.map((t, idx) => ({
             index: idx + 1,
             type: t.type,
@@ -1229,7 +1174,6 @@ export class TradingEngine {
     };
   }
 
-
   /**
    * Generates a Live Multi-Timeframe Confluence Matrix across 15m, 1h, 4h, and 1D
    */
@@ -1242,35 +1186,45 @@ export class TradingEngine {
 
     const timeframes = await Promise.all(
       tfs.map(async (tf) => {
-        const candles = await this.fetchCandles(normalized.binancePair, tf, 60);
-        const closes = candles.map((c) => c.close);
-        const ema20 = this.computeEMA(closes, 20);
-        const ema50 = this.computeEMA(closes, 50);
-        const rsi = Math.round(this.computeRSI(closes, 14));
-        const macd = this.computeMACD(closes);
+        try {
+          const candles = await this.fetchCandles(normalized.binancePair, tf, 60);
+          const closes = candles.map((c) => c.close);
+          const ema20 = this.computeEMA(closes, 20);
+          const ema50 = this.computeEMA(closes, 50);
+          const rsi = Math.round(this.computeRSI(closes, 14));
+          const macd = this.computeMACD(closes);
 
-        let trend: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = 'NEUTRAL';
-        let score = 5;
+          let trend: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = 'NEUTRAL';
+          let score = 5;
 
-        if (ema20 > ema50 && rsi > 50) {
-          trend = 'BULLISH';
-          score = Math.min(10, 6 + (rsi > 55 ? 2 : 0) + (macd.crossover.includes('BULLISH') ? 2 : 0));
-          bullishCount++;
-        } else if (ema20 < ema50 && rsi < 50) {
-          trend = 'BEARISH';
-          score = Math.min(10, 6 + (rsi < 45 ? 2 : 0) + (macd.crossover.includes('BEARISH') ? 2 : 0));
-          bearishCount++;
+          if (ema20 > ema50 && rsi > 50) {
+            trend = 'BULLISH';
+            score = Math.min(10, 6 + (rsi > 55 ? 2 : 0) + (macd.crossover.includes('BULLISH') ? 2 : 0));
+            bullishCount++;
+          } else if (ema20 < ema50 && rsi < 50) {
+            trend = 'BEARISH';
+            score = Math.min(10, 6 + (rsi < 45 ? 2 : 0) + (macd.crossover.includes('BEARISH') ? 2 : 0));
+            bearishCount++;
+          }
+
+          const macdStatus = macd.histogram > 0 ? 'BULLISH' : macd.histogram < 0 ? 'BEARISH' : 'NEUTRAL';
+
+          return {
+            tf,
+            trend,
+            rsi,
+            macd: macdStatus as 'BULLISH' | 'BEARISH' | 'NEUTRAL',
+            score,
+          };
+        } catch {
+          return {
+            tf,
+            trend: 'NEUTRAL' as const,
+            rsi: 50,
+            macd: 'NEUTRAL' as const,
+            score: 5,
+          };
         }
-
-        const macdStatus = macd.histogram > 0 ? 'BULLISH' : macd.histogram < 0 ? 'BEARISH' : 'NEUTRAL';
-
-        return {
-          tf,
-          trend,
-          rsi,
-          macd: macdStatus as 'BULLISH' | 'BEARISH' | 'NEUTRAL',
-          score,
-        };
       })
     );
 
@@ -1284,25 +1238,5 @@ export class TradingEngine {
       overallBias,
       confluenceRatio: `${bullishCount > bearishCount ? bullishCount : bearishCount}/4 Aligned`,
     };
-  }
-
-  private static generateSyntheticCandles(pair: string, count = 100): Candle[] {
-    const base = pair.includes('BTC') ? 95000 : pair.includes('ETH') ? 2700 : pair.includes('SOL') ? 180 : pair.includes('PAXG') ? 2900 : 50;
-    const now = Date.now();
-    const candles: Candle[] = [];
-    let cur = base;
-
-    for (let i = count; i >= 0; i--) {
-      const time = now - i * 3600 * 1000;
-      const change = (Math.sin(i / 5) * 0.008 + (Math.random() - 0.49) * 0.015) * cur;
-      const open = cur;
-      const close = cur + change;
-      const high = Math.max(open, close) + Math.random() * 0.005 * cur;
-      const low = Math.min(open, close) - Math.random() * 0.005 * cur;
-      const volume = Math.floor(Math.random() * 50000 + 10000);
-      cur = close;
-      candles.push({ time, open, high, low, close, volume });
-    }
-    return candles;
   }
 }

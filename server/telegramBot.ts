@@ -1,9 +1,10 @@
 import { TradingEngine } from './tradingEngine';
 import { GeminiTradingAssistant } from './geminiService';
 import { BotStatusInfo, TelegramLog, TradeSetup } from '../src/types';
+import { MarketDataError } from './marketDataProvider';
 
 export class TelegramBotService {
-  private static botToken: string = process.env.TELEGRAM_BOT_TOKEN || '8821939207:AAFzBm04GBF-uVzdnfCbvZmjEmpkApFdUvs';
+  private static botToken: string = process.env.TELEGRAM_BOT_TOKEN || '';
   private static botInfo: { id: number; username: string; first_name: string } | null = null;
   private static logs: TelegramLog[] = [];
   private static isPolling = false;
@@ -11,19 +12,25 @@ export class TelegramBotService {
   private static totalMessagesCount = 0;
   private static priceAlerts: Array<{ id: string; chatId: number; symbol: string; targetPrice: number; condition: 'ABOVE' | 'BELOW'; createdAt: string }> = [];
   private static alertsLoopStarted = false;
+  private static webhookUrl: string | undefined = undefined;
+
+  // Deduplication ring buffer for incoming webhook and polling update_ids
+  private static processedUpdateIds: Set<number> = new Set();
+  private static updateIdQueue: number[] = [];
+  private static readonly MAX_SEEN_UPDATES = 2000;
 
   /**
-   * Initializes the Telegram bot, checks credentials, and starts direct long-polling
+   * Initializes the Telegram bot, verifies token, and configures Webhook or Polling mode
    */
-  public static async init(_appUrl?: string): Promise<void> {
+  public static async init(appUrl?: string): Promise<void> {
     const token = this.getToken();
     if (!token) {
-      console.warn('⚠️ No TELEGRAM_BOT_TOKEN provided. Telegram Bot service is idle.');
+      console.warn('⚠️ No TELEGRAM_BOT_TOKEN provided. Telegram Bot service is in standby.');
       return;
     }
 
     try {
-      // 1. Verify Bot Token
+      // 1. Verify Bot Token against Telegram getMe
       const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
       const data = await res.json();
 
@@ -33,27 +40,35 @@ export class TelegramBotService {
           username: data.result.username,
           first_name: data.result.first_name,
         };
-        console.log(`🤖 Telegram Bot connected: @${this.botInfo.username} (${this.botInfo.first_name})`);
+        console.log(`🤖 Telegram Bot verified: @${this.botInfo.username} (${this.botInfo.first_name})`);
 
         // 2. Set Bot Commands Menu in Telegram
         await this.setBotCommands();
 
-        // 3. Clear any stuck Webhooks so Telegram immediately delivers all pending & new updates via getUpdates
-        try {
-          const delRes = await fetch(`https://api.telegram.org/bot${token}/deleteWebhook?drop_pending_updates=false`);
-          const delData = await delRes.json();
-          console.log('📡 Telegram Webhook cleared for Direct Long-Polling:', delData.description || delData.ok);
-        } catch (delErr: any) {
-          console.warn('Telegram deleteWebhook warning:', delErr?.message);
+        // 3. Determine Operating Mode: Webhook vs Polling
+        const configuredMode = (process.env.TELEGRAM_MODE || '').toLowerCase();
+        const targetUrl = appUrl || process.env.APP_URL;
+        const isPreviewDomain = targetUrl && (targetUrl.includes('ais-dev') || targetUrl.includes('ais-pre') || targetUrl.includes('localhost'));
+
+        // If explicitly set to webhook on a valid production domain (not behind preview auth)
+        if (configuredMode === 'webhook' && targetUrl && !isPreviewDomain) {
+          await this.registerWebhook(targetUrl, process.env.TELEGRAM_WEBHOOK_SECRET);
+        } else {
+          // Cloud Run preview domains require Google Auth from external webhooks (causes 302 Found from Telegram).
+          // Direct polling operates via outbound HTTPS to api.telegram.org and works 100% reliably in real-time.
+          console.log('🔄 Activating live Telegram long-polling (bypasses webhook proxy restrictions)...');
+          try {
+            await fetch(`https://api.telegram.org/bot${token}/deleteWebhook?drop_pending_updates=false`);
+          } catch {
+            // Ignore
+          }
+          this.startPolling();
         }
 
-        // 4. Start active long-polling listener
-        this.startPolling();
-
-        // 5. Start real-time price alerts monitor loop
+        // 4. Start real-time price alerts monitor loop
         this.startPriceAlertsMonitor();
       } else {
-        console.error('❌ Invalid Telegram Bot Token:', data.description);
+        console.error('❌ Invalid Telegram Bot Token: Telegram rejected token with', data.description || 'Unknown error');
       }
     } catch (e: any) {
       console.error('Telegram bot init error:', e?.message);
@@ -61,7 +76,7 @@ export class TelegramBotService {
   }
 
   public static getToken(): string {
-    return process.env.TELEGRAM_BOT_TOKEN || this.botToken;
+    return (process.env.TELEGRAM_BOT_TOKEN || this.botToken || '').trim();
   }
 
   public static setToken(token: string): void {
@@ -71,21 +86,160 @@ export class TelegramBotService {
   }
 
   public static getStatus(): BotStatusInfo {
+    const mode: 'webhook' | 'polling' | 'standby' = this.isPolling
+      ? 'polling'
+      : this.webhookUrl
+      ? 'webhook'
+      : this.botInfo
+      ? 'webhook'
+      : 'standby';
+
     return {
       isConfigured: !!this.botInfo,
       botUsername: this.botInfo?.username,
       botFirstName: this.botInfo?.first_name,
       botId: this.botInfo?.id,
-      webhookUrl: undefined,
-      mode: 'polling',
+      webhookUrl: this.webhookUrl,
+      mode,
       lastActivity: this.logs.length > 0 ? this.logs[0].timestamp : undefined,
       totalMessagesHandled: this.totalMessagesCount,
       activeSignalsCount: this.logs.filter((l) => l.signalGenerated).length,
+      activeAlertsCount: this.priceAlerts.length,
     };
   }
 
   public static getLogs(): TelegramLog[] {
     return this.logs.slice(0, 50);
+  }
+
+  /**
+   * Registers a Telegram HTTPS Webhook
+   */
+  public static async registerWebhook(baseUrl: string, secretToken?: string): Promise<{ ok: boolean; message: string }> {
+    const token = this.getToken();
+    if (!token) return { ok: false, message: 'No Telegram bot token configured' };
+
+    const cleanBaseUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanBaseUrl}/api/telegram-webhook`;
+
+    try {
+      const payload: any = {
+        url: endpoint,
+        allowed_updates: ['message', 'callback_query'],
+        drop_pending_updates: false,
+      };
+
+      if (secretToken) {
+        payload.secret_token = secretToken;
+      }
+
+      const res = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json();
+      if (data.ok) {
+        this.webhookUrl = endpoint;
+        this.isPolling = false;
+        console.log(`📡 Telegram Webhook successfully registered: ${endpoint}`);
+        return { ok: true, message: `Webhook registered at ${endpoint}` };
+      } else {
+        console.error('Failed to set Telegram webhook:', data.description);
+        return { ok: false, message: data.description || 'Webhook registration failed' };
+      }
+    } catch (err: any) {
+      console.error('Telegram setWebhook error:', err?.message);
+      return { ok: false, message: err?.message || 'Network error registering webhook' };
+    }
+  }
+
+  /**
+   * Deletes the Telegram Webhook
+   */
+  public static async deleteWebhook(): Promise<{ ok: boolean; message: string }> {
+    const token = this.getToken();
+    if (!token) return { ok: false, message: 'No Telegram bot token' };
+
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${token}/deleteWebhook?drop_pending_updates=false`);
+      const data = await res.json();
+      this.webhookUrl = undefined;
+      return { ok: !!data.ok, message: data.description || 'Webhook deleted' };
+    } catch (e: any) {
+      return { ok: false, message: e?.message };
+    }
+  }
+
+  /**
+   * Gets current Webhook status from Telegram
+   */
+  public static async getWebhookInfo(): Promise<any> {
+    const token = this.getToken();
+    if (!token) return null;
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
+      const data = await res.json();
+      return data.ok ? data.result : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Processes incoming Webhook updates with deduplication and secret token validation
+   */
+  public static async handleWebhookUpdate(update: any, secretTokenHeader?: string): Promise<{ ok: boolean; status: string }> {
+    const expectedSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
+    if (expectedSecret && secretTokenHeader !== expectedSecret) {
+      console.warn('⛔ Unauthorized Telegram Webhook invocation: Secret token mismatch.');
+      return { ok: false, status: 'UNAUTHORIZED' };
+    }
+
+    if (!update || typeof update.update_id !== 'number') {
+      return { ok: false, status: 'INVALID_PAYLOAD' };
+    }
+
+    // Deduplication check
+    if (this.processedUpdateIds.has(update.update_id)) {
+      return { ok: true, status: 'DUPLICATE_IGNORED' };
+    }
+
+    this.processedUpdateIds.add(update.update_id);
+    this.updateIdQueue.push(update.update_id);
+    if (this.updateIdQueue.length > this.MAX_SEEN_UPDATES) {
+      const oldest = this.updateIdQueue.shift();
+      if (oldest !== undefined) this.processedUpdateIds.delete(oldest);
+    }
+
+    // Process update asynchronously so the HTTP response returns immediately (prevents Telegram retry loops)
+    setImmediate(async () => {
+      try {
+        await this.handleUpdate(update);
+      } catch (err: any) {
+        console.error('Error processing webhook update asynchronously:', err?.message);
+      }
+    });
+
+    return { ok: true, status: 'ACCEPTED' };
+  }
+
+  /**
+   * Checks if user is permitted in Private Institutional Mode
+   */
+  private static isUserAuthorized(userId?: number | string, username?: string): boolean {
+    const allowed = process.env.TELEGRAM_ALLOWED_USERS;
+    if (!allowed || allowed.trim() === '') {
+      // Public mode by default if no whitelist is specified
+      return true;
+    }
+
+    const whitelist = allowed.split(',').map((u) => u.trim().replace(/^@/, '').toLowerCase());
+    const idStr = userId ? String(userId).toLowerCase() : '';
+    const userStr = username ? username.toLowerCase() : '';
+
+    return whitelist.includes(idStr) || (!!userStr && whitelist.includes(userStr));
   }
 
   /**
@@ -117,13 +271,13 @@ export class TelegramBotService {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ commands }),
       });
-    } catch (e) {
+    } catch {
       // Ignore
     }
   }
 
   /**
-   * Main incoming update handler (invoked by webhook POST or polling loop)
+   * Main incoming update dispatcher
    */
   public static async handleUpdate(update: any): Promise<void> {
     try {
@@ -142,13 +296,24 @@ export class TelegramBotService {
    */
   private static async processIncomingMessage(message: any): Promise<void> {
     const chatId = message.chat?.id;
+    const fromId = message.from?.id;
+    const username = message.from?.username;
     const text: string = (message.text || '').trim();
-    const fromUser = message.from?.first_name || message.from?.username || 'User';
+    const fromUser = message.from?.first_name || username || 'Trader';
 
     if (!chatId || !text) return;
 
+    // Strict Private Mode Authorization Gate
+    if (!this.isUserAuthorized(fromId, username)) {
+      console.warn(`⛔ Unauthorized access attempt from user ID: ${fromId}, username: ${username || 'none'}`);
+      await this.sendMessage(
+        chatId,
+        `⛔ <b>Access Restricted</b>\n\nThis Trading Assistant is currently operating in <b>Private Institutional Mode</b>.\nYour account is not on the authorized whitelist.\n\nPlease contact the administrator to request access.`
+      );
+      return;
+    }
+
     this.totalMessagesCount++;
-    console.log(`📩 Telegram message from ${fromUser} (${chatId}): "${text}"`);
 
     // Send "Typing..." action to Telegram
     this.sendChatAction(chatId, 'typing').catch(() => {});
@@ -213,22 +378,30 @@ Tap any button below to launch an instant analysis:`;
     // 2. /gold or /xauusd
     else if (text.startsWith('/gold') || text.startsWith('/xauusd')) {
       isSignal = true;
-      const setup = await this.generateSetupForSymbol('XAUUSD', '1h');
-      replyText = setup.telegramFormattedCard;
-      replyMarkup = this.buildSetupKeyboard('XAUUSD', '1h');
+      try {
+        const setup = await this.generateSetupForSymbol('XAUUSD', '1h');
+        replyText = setup.telegramFormattedCard;
+        replyMarkup = this.buildSetupKeyboard('XAUUSD', '1h');
+      } catch (err: any) {
+        replyText = `⚠️ <b>Market Data Notice (Gold / XAUUSD)</b>\n\n${err?.message || 'Live feeds are temporarily unavailable'}. Please try again in a few moments.`;
+      }
     }
     // 3. /crypto or /market
     else if (text.startsWith('/crypto') || text.startsWith('/market')) {
-      replyText = await this.generateMarketOverviewText();
-      replyMarkup = {
-        inline_keyboard: [
-          [
-            { text: '🥇 Gold Setup', callback_data: 'setup:XAUUSD:1h' },
-            { text: '₿ BTC Setup', callback_data: 'setup:BTCUSDT:1h' },
+      try {
+        replyText = await this.generateMarketOverviewText();
+        replyMarkup = {
+          inline_keyboard: [
+            [
+              { text: '🥇 Gold Setup', callback_data: 'setup:XAUUSD:1h' },
+              { text: '₿ BTC Setup', callback_data: 'setup:BTCUSDT:1h' },
+            ],
+            [{ text: '🔄 Refresh Market Overview', callback_data: 'market' }],
           ],
-          [{ text: '🔄 Refresh Market Overview', callback_data: 'market' }],
-        ],
-      };
+        };
+      } catch (err: any) {
+        replyText = `⚠️ <b>Market Data Notice:</b> ${err?.message || 'Unable to fetch market overview'}.`;
+      }
     }
     // 4. /scan
     else if (text.startsWith('/scan')) {
@@ -248,15 +421,19 @@ Tap any button below to launch an instant analysis:`;
     else if (text.startsWith('/smc')) {
       const parts = text.split(/\s+/).slice(1);
       const symbolInput = parts[0] || 'BTC';
-      replyText = await this.generateSMCText(symbolInput);
-      replyMarkup = {
-        inline_keyboard: [
-          [
-            { text: `🎯 Setup for ${symbolInput.toUpperCase()}`, callback_data: `setup:${symbolInput}:1h` },
-            { text: `📶 Multi-TF Matrix`, callback_data: `mtf:${symbolInput}` },
+      try {
+        replyText = await this.generateSMCText(symbolInput);
+        replyMarkup = {
+          inline_keyboard: [
+            [
+              { text: `🎯 Setup for ${symbolInput.toUpperCase()}`, callback_data: `setup:${symbolInput}:1h` },
+              { text: `📶 Multi-TF Matrix`, callback_data: `mtf:${symbolInput}` },
+            ],
           ],
-        ],
-      };
+        };
+      } catch (err: any) {
+        replyText = `⚠️ <b>SMC Calculation Notice:</b> ${err?.message || 'Market data unavailable for SMC analysis'}.`;
+      }
     }
     // 6. /sentiment or /fng
     else if (text.startsWith('/sentiment') || text.startsWith('/fng')) {
@@ -296,19 +473,23 @@ Tap any button below to launch an instant analysis:`;
         ],
       };
     }
-    // 9. /backtest <symbol> [strategy]
+    // 9. /backtest <symbol>
     else if (text.startsWith('/backtest')) {
       const parts = text.split(/\s+/).slice(1);
       const symbolInput = parts[0] || 'BTC';
-      replyText = await this.generateBacktestText(symbolInput);
-      replyMarkup = {
-        inline_keyboard: [
-          [
-            { text: `🎯 Get Live Setup`, callback_data: `setup:${symbolInput}:1h` },
-            { text: `🏦 SMC Analysis`, callback_data: `smc:${symbolInput}` },
+      try {
+        replyText = await this.generateBacktestText(symbolInput);
+        replyMarkup = {
+          inline_keyboard: [
+            [
+              { text: `🎯 Get Live Setup`, callback_data: `setup:${symbolInput}:1h` },
+              { text: `🏦 SMC Analysis`, callback_data: `smc:${symbolInput}` },
+            ],
           ],
-        ],
-      };
+        };
+      } catch (err: any) {
+        replyText = `⚠️ <b>Backtest Notice:</b> ${err?.message || 'Historical candle feed unavailable'}.`;
+      }
     }
     // 10. /calendar
     else if (text.startsWith('/calendar')) {
@@ -322,15 +503,15 @@ Tap any button below to launch an instant analysis:`;
         ],
       };
     }
-    // 11. /alert <symbol> <targetPrice> [above|below]
+    // 11. /alert <symbol> <targetPrice>
     else if (text.startsWith('/alert') && !text.startsWith('/alerts')) {
       replyText = await this.handleAddAlert(chatId, text);
     }
-    // 12. /alerts (list active alerts)
+    // 12. /alerts
     else if (text.startsWith('/alerts')) {
       replyText = this.handleListAlerts(chatId);
     }
-    // 13. /riskcalc <entry> <sl> <capital> [risk%]
+    // 13. /riskcalc
     else if (text.startsWith('/riskcalc')) {
       replyText = this.calculateRisk(text);
     }
@@ -342,13 +523,16 @@ Tap any button below to launch an instant analysis:`;
       const validTf = ['15m', '1h', '4h', '1d'].includes(tfInput) ? tfInput : '1h';
 
       isSignal = true;
-      const setup = await this.generateSetupForSymbol(symbolInput, validTf);
-      replyText = setup.telegramFormattedCard;
-      replyMarkup = this.buildSetupKeyboard(setup.symbol, validTf);
+      try {
+        const setup = await this.generateSetupForSymbol(symbolInput, validTf);
+        replyText = setup.telegramFormattedCard;
+        replyMarkup = this.buildSetupKeyboard(setup.symbol, validTf);
+      } catch (err: any) {
+        replyText = `⚠️ <b>Market Data Notice (${symbolInput.toUpperCase()})</b>\n\n${err?.message || 'Feed unavailable'}. Please verify the symbol or try again in a few moments.`;
+      }
     }
     // 15. Natural Language query handling
     else {
-      // Check if user is asking for a setup or analysis in natural language
       const lower = text.toLowerCase();
       let extractedSymbol = '';
       if (lower.includes('gold') || lower.includes('xau')) extractedSymbol = 'XAUUSD';
@@ -369,9 +553,13 @@ Tap any button below to launch an instant analysis:`;
       if (extractedSymbol || lower.includes('setup') || lower.includes('trade') || lower.includes('signal') || lower.includes('buy') || lower.includes('sell')) {
         const sym = extractedSymbol || 'XAUUSD';
         isSignal = true;
-        const setup = await this.generateSetupForSymbol(sym, extractedTf, text);
-        replyText = setup.telegramFormattedCard;
-        replyMarkup = this.buildSetupKeyboard(setup.symbol, extractedTf);
+        try {
+          const setup = await this.generateSetupForSymbol(sym, extractedTf, text);
+          replyText = setup.telegramFormattedCard;
+          replyMarkup = this.buildSetupKeyboard(setup.symbol, extractedTf);
+        } catch (err: any) {
+          replyText = `⚠️ <b>Market Notice:</b> ${err?.message || 'Live data feed unavailable for ' + sym}.`;
+        }
       } else if (lower.includes('smc') || lower.includes('order block') || lower.includes('fvg')) {
         replyText = await this.generateSMCText(extractedSymbol || 'BTCUSDT');
       } else if (lower.includes('sentiment') || lower.includes('fear') || lower.includes('greed')) {
@@ -379,7 +567,6 @@ Tap any button below to launch an instant analysis:`;
       } else if (lower.includes('funding') || lower.includes('squeeze')) {
         replyText = await this.generateFundingText();
       } else {
-        // General trading Q&A with Gemini
         replyText = await GeminiTradingAssistant.answerGeneralTradingQuery(text);
       }
     }
@@ -405,7 +592,8 @@ Tap any button below to launch an instant analysis:`;
   private static async processCallbackQuery(callbackQuery: any): Promise<void> {
     const callbackId = callbackQuery.id;
     const chatId = callbackQuery.message?.chat?.id;
-    const messageId = callbackQuery.message?.message_id;
+    const fromId = callbackQuery.from?.id;
+    const username = callbackQuery.from?.username;
     const data: string = callbackQuery.data || '';
 
     // Acknowledge callback immediately
@@ -413,86 +601,95 @@ Tap any button below to launch an instant analysis:`;
 
     if (!chatId || !data) return;
 
-    if (data.startsWith('setup:')) {
-      const [, sym, tf] = data.split(':');
-      const validTf = (tf as '15m' | '1h' | '4h' | '1d') || '1h';
-      const setup = await this.generateSetupForSymbol(sym, validTf);
-      await this.sendMessage(chatId, setup.telegramFormattedCard, this.buildSetupKeyboard(setup.symbol, validTf));
-    } else if (data.startsWith('smc:')) {
-      const [, sym] = data.split(':');
-      const smcText = await this.generateSMCText(sym || 'BTCUSDT');
-      await this.sendMessage(chatId, smcText, {
-        inline_keyboard: [
-          [
-            { text: `🎯 Get Setup for ${sym}`, callback_data: `setup:${sym}:1h` },
-            { text: `📶 Multi-TF Matrix`, callback_data: `mtf:${sym}` },
+    if (!this.isUserAuthorized(fromId, username)) {
+      await this.sendMessage(chatId, `⛔ <b>Access Restricted:</b> Your account is not authorized.`);
+      return;
+    }
+
+    try {
+      if (data.startsWith('setup:')) {
+        const [, sym, tf] = data.split(':');
+        const validTf = (tf as '15m' | '1h' | '4h' | '1d') || '1h';
+        const setup = await this.generateSetupForSymbol(sym, validTf);
+        await this.sendMessage(chatId, setup.telegramFormattedCard, this.buildSetupKeyboard(setup.symbol, validTf));
+      } else if (data.startsWith('smc:')) {
+        const [, sym] = data.split(':');
+        const smcText = await this.generateSMCText(sym || 'BTCUSDT');
+        await this.sendMessage(chatId, smcText, {
+          inline_keyboard: [
+            [
+              { text: `🎯 Get Setup for ${sym}`, callback_data: `setup:${sym}:1h` },
+              { text: `📶 Multi-TF Matrix`, callback_data: `mtf:${sym}` },
+            ],
           ],
-        ],
-      });
-    } else if (data.startsWith('mtf:')) {
-      const [, sym] = data.split(':');
-      const mtfText = await this.generateMTFText(sym || 'BTCUSDT');
-      await this.sendMessage(chatId, mtfText, {
-        inline_keyboard: [
-          [
-            { text: `🎯 Setup for ${sym}`, callback_data: `setup:${sym}:1h` },
-            { text: `🏦 SMC Analysis`, callback_data: `smc:${sym}` },
+        });
+      } else if (data.startsWith('mtf:')) {
+        const [, sym] = data.split(':');
+        const mtfText = await this.generateMTFText(sym || 'BTCUSDT');
+        await this.sendMessage(chatId, mtfText, {
+          inline_keyboard: [
+            [
+              { text: `🎯 Setup for ${sym}`, callback_data: `setup:${sym}:1h` },
+              { text: `🏦 SMC Analysis`, callback_data: `smc:${sym}` },
+            ],
           ],
-        ],
-      });
-    } else if (data === 'sentiment') {
-      const sentText = await this.generateSentimentText();
-      await this.sendMessage(chatId, sentText, {
-        inline_keyboard: [
-          [
-            { text: '⚡ Check Funding Rates', callback_data: 'funding' },
-            { text: '📡 Scan Markets', callback_data: 'scan' },
+        });
+      } else if (data === 'sentiment') {
+        const sentText = await this.generateSentimentText();
+        await this.sendMessage(chatId, sentText, {
+          inline_keyboard: [
+            [
+              { text: '⚡ Check Funding Rates', callback_data: 'funding' },
+              { text: '📡 Scan Markets', callback_data: 'scan' },
+            ],
           ],
-        ],
-      });
-    } else if (data === 'funding') {
-      const fundText = await this.generateFundingText();
-      await this.sendMessage(chatId, fundText, {
-        inline_keyboard: [
-          [
-            { text: '😱 Fear & Greed', callback_data: 'sentiment' },
-            { text: '📡 Scan Markets', callback_data: 'scan' },
+        });
+      } else if (data === 'funding') {
+        const fundText = await this.generateFundingText();
+        await this.sendMessage(chatId, fundText, {
+          inline_keyboard: [
+            [
+              { text: '😱 Fear & Greed', callback_data: 'sentiment' },
+              { text: '📡 Scan Markets', callback_data: 'scan' },
+            ],
           ],
-        ],
-      });
-    } else if (data === 'calendar') {
-      const calText = this.generateCalendarText();
-      await this.sendMessage(chatId, calText, {
-        inline_keyboard: [
-          [
-            { text: '🥇 Gold Setup', callback_data: 'setup:XAUUSD:1h' },
-            { text: '₿ BTC Setup', callback_data: 'setup:BTCUSDT:1h' },
+        });
+      } else if (data === 'calendar') {
+        const calText = this.generateCalendarText();
+        await this.sendMessage(chatId, calText, {
+          inline_keyboard: [
+            [
+              { text: '🥇 Gold Setup', callback_data: 'setup:XAUUSD:1h' },
+              { text: '₿ BTC Setup', callback_data: 'setup:BTCUSDT:1h' },
+            ],
           ],
-        ],
-      });
-    } else if (data === 'scan') {
-      const scanText = await this.generateScannerText();
-      await this.sendMessage(chatId, scanText, {
-        inline_keyboard: [
-          [
-            { text: '🥇 Gold Setup', callback_data: 'setup:XAUUSD:1h' },
-            { text: '₿ BTC Setup', callback_data: 'setup:BTCUSDT:1h' },
-            { text: '🚀 SOL Setup', callback_data: 'setup:SOLUSDT:1h' },
+        });
+      } else if (data === 'scan') {
+        const scanText = await this.generateScannerText();
+        await this.sendMessage(chatId, scanText, {
+          inline_keyboard: [
+            [
+              { text: '🥇 Gold Setup', callback_data: 'setup:XAUUSD:1h' },
+              { text: '₿ BTC Setup', callback_data: 'setup:BTCUSDT:1h' },
+              { text: '🚀 SOL Setup', callback_data: 'setup:SOLUSDT:1h' },
+            ],
+            [{ text: '🔄 Rescan Markets', callback_data: 'scan' }],
           ],
-          [{ text: '🔄 Rescan Markets', callback_data: 'scan' }],
-        ],
-      });
-    } else if (data === 'market') {
-      const marketText = await this.generateMarketOverviewText();
-      await this.sendMessage(chatId, marketText, {
-        inline_keyboard: [
-          [
-            { text: '🥇 Gold Setup', callback_data: 'setup:XAUUSD:1h' },
-            { text: '₿ BTC Setup', callback_data: 'setup:BTCUSDT:1h' },
+        });
+      } else if (data === 'market') {
+        const marketText = await this.generateMarketOverviewText();
+        await this.sendMessage(chatId, marketText, {
+          inline_keyboard: [
+            [
+              { text: '🥇 Gold Setup', callback_data: 'setup:XAUUSD:1h' },
+              { text: '₿ BTC Setup', callback_data: 'setup:BTCUSDT:1h' },
+            ],
+            [{ text: '🔄 Refresh Market Overview', callback_data: 'market' }],
           ],
-          [{ text: '🔄 Refresh Market Overview', callback_data: 'market' }],
-        ],
-      });
+        });
+      }
+    } catch (err: any) {
+      await this.sendMessage(chatId, `⚠️ <b>Operation Notice:</b> ${err?.message || 'Data feed temporarily unavailable'}.`);
     }
   }
 
@@ -583,13 +780,17 @@ Tap any button below to launch an instant analysis:`;
     let text = `⚡ <b>FUTURES FUNDING RATES & SQUEEZE WARNING</b>
 ━━━━━━━━━━━━━━━━━━━━\n\n`;
 
-    list.forEach((item) => {
-      const squeezeIcon = item.squeezeRisk === 'HIGH_LONG_SQUEEZE' ? '⚠️ High Long Squeeze Risk (Overleveraged Longs)' : item.squeezeRisk === 'HIGH_SHORT_SQUEEZE' ? '🚀 High Short Squeeze Risk (Short Trap Active!)' : '✅ Balanced Funding';
-      text += `<b>${item.symbol}</b>\n`;
-      text += `• <b>Funding Rate:</b> <code>${item.fundingRatePercent}</code> (Next in: ${item.nextFundingTime})\n`;
-      text += `• <b>Long/Short Ratio:</b> <code>${item.longShortRatio}x</code>\n`;
-      text += `• <b>Squeeze Regime:</b> ${squeezeIcon}\n\n`;
-    });
+    if (list.length === 0) {
+      text += `<i>Funding rate data is temporarily refreshing from Binance Futures...</i>\n\n`;
+    } else {
+      list.forEach((item) => {
+        const squeezeIcon = item.squeezeRisk === 'HIGH_LONG_SQUEEZE' ? '⚠️ High Long Squeeze Risk (Overleveraged Longs)' : item.squeezeRisk === 'HIGH_SHORT_SQUEEZE' ? '🚀 High Short Squeeze Risk (Short Trap Active!)' : '✅ Balanced Funding';
+        text += `<b>${item.symbol}</b>\n`;
+        text += `• <b>Funding Rate:</b> <code>${item.fundingRatePercent}</code> (Next in: ${item.nextFundingTime})\n`;
+        text += `• <b>Long/Short Ratio:</b> <code>${item.longShortRatio}x</code>\n`;
+        text += `• <b>Squeeze Regime:</b> ${squeezeIcon}\n\n`;
+      });
+    }
 
     text += `━━━━━━━━━━━━━━━━━━━━\n💡 <i>Negative funding rates with rising volume indicate massive short squeeze potential.</i>`;
     return text;
@@ -631,7 +832,7 @@ Tap any button below to launch an instant analysis:`;
 <b>Strategy:</b> <code>${result.strategyName}</code>
 
 ${winRateEmoji} <b>Win Rate:</b> <code>${result.winRatePercent}%</code> (${result.winningTrades} Wins / ${result.losingTrades} Losses)
-📈 <b>Simulated Net Return:</b> <code>+${result.netReturnPercent}%</code>
+📈 <b>Simulated Net Return:</b> <code>${result.netReturnPercent >= 0 ? '+' : ''}${result.netReturnPercent}%</code>
 ⚡ <b>Profit Factor:</b> <code>${result.profitFactor}x</code>
 🛡️ <b>Max Drawdown:</b> <code>-${result.maxDrawdownPercent}%</code>
 📐 <b>Avg Risk/Reward:</b> <code>1:${result.averageRiskReward}</code>
@@ -685,8 +886,14 @@ ${winRateEmoji} <b>Win Rate:</b> <code>${result.winRatePercent}%</code> (${resul
       return `❌ Invalid price target. Please enter a valid number.`;
     }
 
-    const candles = await TradingEngine.fetchCandles(normalized.binancePair, '1h', 5);
-    const currentPrice = candles[candles.length - 1]?.close || targetPrice;
+    let currentPrice = targetPrice;
+    try {
+      const candles = await TradingEngine.fetchCandles(normalized.binancePair, '1h', 5);
+      currentPrice = candles[candles.length - 1]?.close || targetPrice;
+    } catch {
+      // Use targetPrice as reference if fetch fails temporarily
+    }
+
     const condition: 'ABOVE' | 'BELOW' = targetPrice >= currentPrice ? 'ABOVE' : 'BELOW';
 
     const alertItem = {
@@ -728,7 +935,7 @@ ${winRateEmoji} <b>Win Rate:</b> <code>${result.winRatePercent}%</code> (${resul
   }
 
   /**
-   * Background 24/7 monitor that periodically checks prices against user alerts
+   * Background 24/7 monitor that periodically checks prices against user alerts using verified feeds only
    */
   private static startPriceAlertsMonitor(): void {
     if (this.alertsLoopStarted) return;
@@ -776,15 +983,15 @@ ${winRateEmoji} <b>Win Rate:</b> <code>${result.winRatePercent}%</code> (${resul
               ],
             });
           }
-        } catch (e: any) {
-          // Ignore individual alert fetch errors
+        } catch {
+          // If market feed fails for an alert bar, skip safely without falsifying triggers
         }
       }
-    }, 20000); // Check every 20 seconds
+    }, 20000);
   }
 
   /**
-   * Generates a full quantitative + Gemini trade setup for a given symbol
+   * Generates a full quantitative + Gemini trade setup for a given symbol with verified feeds
    */
   public static async generateSetupForSymbol(rawSymbol: string, timeframe: '15m' | '1h' | '4h' | '1d' = '1h', customQuery?: string): Promise<TradeSetup> {
     const normalized = TradingEngine.normalizeSymbol(rawSymbol);
@@ -843,14 +1050,18 @@ ${winRateEmoji} <b>Win Rate:</b> <code>${result.winRatePercent}%</code> (${resul
 
     let text = `📡 <b>MULTI-ASSET MARKET SCANNER (1H TIMEFRAME)</b>\n━━━━━━━━━━━━━━━━━━━━\n\n`;
 
-    valid.forEach((item: any) => {
-      const { setup, name } = item;
-      const emoji = setup.action === 'LONG' ? '🟢 LONG' : setup.action === 'SHORT' ? '🔴 SHORT' : '🟡 NEUTRAL';
-      text += `<b>${name}</b> • $${setup.currentPrice.toLocaleString()}\n`;
-      text += `• <b>Action:</b> ${emoji} | <b>Confluence:</b> ${setup.confluenceScore}/10 (${setup.riskRewardRatio} R:R)\n`;
-      text += `• <b>Entry:</b> $${setup.entryZone[0]} - $${setup.entryZone[1]} | <b>SL:</b> $${setup.stopLoss}\n`;
-      text += `• <b>TP1:</b> $${setup.takeProfit1} | <b>TP2:</b> $${setup.takeProfit2}\n\n`;
-    });
+    if (valid.length === 0) {
+      text += `<i>Live market feeds are temporarily refreshing. Please try again in 10 seconds.</i>\n\n`;
+    } else {
+      valid.forEach((item: any) => {
+        const { setup, name } = item;
+        const emoji = setup.action === 'LONG' ? '🟢 LONG' : setup.action === 'SHORT' ? '🔴 SHORT' : '🟡 NEUTRAL';
+        text += `<b>${name}</b> • $${setup.currentPrice.toLocaleString()}\n`;
+        text += `• <b>Action:</b> ${emoji} | <b>Confluence:</b> ${setup.confluenceScore}/10 (${setup.riskRewardRatio} R:R)\n`;
+        text += `• <b>Entry:</b> $${setup.entryZone[0]} - $${setup.entryZone[1]} | <b>SL:</b> $${setup.stopLoss}\n`;
+        text += `• <b>TP1:</b> $${setup.takeProfit1} | <b>TP2:</b> $${setup.takeProfit2}\n\n`;
+      });
+    }
 
     text += `━━━━━━━━━━━━━━━━━━━━\n<i>Tap a button below for full analysis & AI breakdown:</i>`;
     return text;
@@ -932,7 +1143,6 @@ ${winRateEmoji} <b>Win Rate:</b> <code>${result.winRatePercent}%</code> (${resul
 
       const data = await res.json();
       if (!data.ok) {
-        console.warn(`Telegram HTML delivery note (${data.description}), retrying with sanitized plain text...`);
         // Fallback: strip tags and send as plain text so user always gets the response
         const cleanText = text.replace(/<[^>]*>?/gm, '');
         const retryRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -983,12 +1193,12 @@ ${winRateEmoji} <b>Win Rate:</b> <code>${result.winRatePercent}%</code> (${resul
   }
 
   /**
-   * Direct high-speed long-polling engine
+   * Direct long-polling listener (used in development or when explicitly configured with TELEGRAM_MODE=polling)
    */
   private static startPolling(): void {
     if (this.isPolling) return;
     this.isPolling = true;
-    console.log('🔄 Telegram Bot live long-polling started');
+    console.log('🔄 Telegram Bot live long-polling listener started');
 
     const poll = async () => {
       if (!this.isPolling) return;
@@ -1014,14 +1224,16 @@ ${winRateEmoji} <b>Win Rate:</b> <code>${result.winRatePercent}%</code> (${resul
           hadUpdates = true;
           for (const update of data.result) {
             this.lastUpdateId = Math.max(this.lastUpdateId, update.update_id);
-            await this.handleUpdate(update);
+            if (!this.processedUpdateIds.has(update.update_id)) {
+              this.processedUpdateIds.add(update.update_id);
+              await this.handleUpdate(update);
+            }
           }
         }
-      } catch (e: any) {
+      } catch {
         // Transient network or timeout, continue
       }
 
-      // If updates were received, poll immediately; otherwise wait 500ms
       setTimeout(poll, hadUpdates ? 100 : 800);
     };
 

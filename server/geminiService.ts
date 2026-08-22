@@ -19,7 +19,9 @@ export class GeminiTradingAssistant {
   }
 
   /**
-   * Synthesizes quantitative trade engine metrics into beginner-friendly explanations and Telegram cards
+   * Synthesizes quantitative trade engine metrics into beginner-friendly explanations and Telegram cards.
+   * STRICT BOUNDARY: The quantitative numbers (Entry, SL, TP, RR, Confluence) are calculated by the deterministic
+   * engine and CANNOT be recalculated or altered by the AI layer.
    */
   public static async synthesizeTradeSetup(
     rawSetup: Omit<TradeSetup, 'aiExplanation' | 'telegramFormattedCard'>,
@@ -28,26 +30,38 @@ export class GeminiTradingAssistant {
   ): Promise<TradeSetup> {
     const ai = this.getClient();
 
-    // Default fallback explanation if AI is offline or key not supplied
+    // Default deterministic fallback explanation if AI is offline or key not supplied
     const defaultExplanation = {
       headline: `${rawSetup.action === 'LONG' ? '🟢 High Confluence Long' : rawSetup.action === 'SHORT' ? '🔴 High Confluence Short' : '🟡 Neutral / Sideways Range'} on ${rawSetup.symbol} (${rawSetup.timeframe})`,
-      simpleRationale: `Trend momentum is aligning with ${indicators.emaTrend.replace(/_/g, ' ')} structure. RSI is at ${indicators.rsi14.toFixed(1)} with ${indicators.macd.crossover.replace(/_/g, ' ')} momentum.`,
-      stepByStepPlan: [
-        `1. Wait for price to enter ${rawSetup.entryZone[0]} - ${rawSetup.entryZone[1]} zone.`,
-        `2. Place initial Stop-Loss strictly at ${rawSetup.stopLoss} (${rawSetup.riskPercent}% risk).`,
-        `3. When TP1 (${rawSetup.takeProfit1}) is reached, secure 50% profit and move Stop-Loss to Entry (Break-even).`,
-        `4. Let runners aim for TP2 (${rawSetup.takeProfit2}) and TP3 (${rawSetup.takeProfit3}).`,
-      ],
-      invalidationTrigger: `A 1-hour candle closing ${rawSetup.action === 'LONG' ? 'below' : 'above'} ${rawSetup.stopLoss} immediately cancels this trade setup.`,
-      riskManagementTip: `Never risk more than 1-2% of your total portfolio balance on this single trade.`,
+      simpleRationale: rawSetup.action === 'NEUTRAL'
+        ? `Market momentum is currently conflicting or range-bound (${indicators.rsiSignal}, ${indicators.emaTrend.replace(/_/g, ' ')}). No statistical edge exists for active risk.`
+        : `Trend momentum is aligning with ${indicators.emaTrend.replace(/_/g, ' ')} structure. RSI is at ${indicators.rsi14.toFixed(1)} with ${indicators.macd.crossover.replace(/_/g, ' ')} momentum.`,
+      stepByStepPlan: rawSetup.action === 'NEUTRAL'
+        ? [
+            `1. Stand by: No active position recommended on ${rawSetup.symbol}.`,
+            `2. Wait for a clean structural break above ${indicators.swingHigh} or below ${indicators.swingLow}.`,
+            `3. Re-scan markets with /scan to locate high-confluence setups across other assets.`,
+          ]
+        : [
+            `1. Wait for price to enter ${rawSetup.entryZone[0]} - ${rawSetup.entryZone[1]} zone.`,
+            `2. Place initial Stop-Loss strictly at ${rawSetup.stopLoss} (${rawSetup.riskPercent}% risk).`,
+            `3. When TP1 (${rawSetup.takeProfit1}) is reached, secure 50% profit and move Stop-Loss to Entry (Break-even).`,
+            `4. Let runners aim for TP2 (${rawSetup.takeProfit2}) and TP3 (${rawSetup.takeProfit3}).`,
+          ],
+      invalidationTrigger: rawSetup.action === 'NEUTRAL'
+        ? `Consolidation range remains until volume displacement breaks key support or resistance.`
+        : `A ${rawSetup.timeframe} candle closing ${rawSetup.action === 'LONG' ? 'below' : 'above'} ${rawSetup.stopLoss} immediately cancels this trade setup.`,
+      riskManagementTip: `Never risk more than 1-2% of your total portfolio balance on this single trade. Capital preservation is priority #1.`,
     };
 
     let aiExplanation = defaultExplanation;
 
     if (ai) {
-      const candidateModels = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
-      const prompt = `You are an elite quantitative hedge fund trader and personal trading coach.
-Analyze this live mathematical trade data:
+      const candidateModels = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview'];
+      const prompt = `You are a disciplined quantitative trading analyst and coach.
+STRICT RULE: The mathematical numbers below are calculated by the deterministic quantitative engine. You MUST NOT alter, recalculate, or hallucinate different price levels, targets, or risk percentages.
+
+MATHEMATICAL TRADE FACTS:
 Symbol: ${rawSetup.symbol} (${rawSetup.name})
 Asset Type: ${rawSetup.assetType}
 Timeframe: ${rawSetup.timeframe}
@@ -71,7 +85,7 @@ ${userCustomQuery ? `User Question: "${userCustomQuery}"` : ''}
 Respond with a JSON object strictly following this structure:
 {
   "headline": "Punchy 1-sentence trade summary",
-  "simpleRationale": "Explain in 2 simple sentences why this trade has a statistical edge, so even a complete beginner understands.",
+  "simpleRationale": "Explain in 2 simple sentences why this setup has a statistical edge (or why to stay out if NEUTRAL), so even a beginner understands.",
   "stepByStepPlan": [
     "Step 1 entry trigger",
     "Step 2 stop loss position",
@@ -97,19 +111,19 @@ Respond with a JSON object strictly following this structure:
             aiExplanation = {
               headline: parsed.headline || defaultExplanation.headline,
               simpleRationale: parsed.simpleRationale || defaultExplanation.simpleRationale,
-              stepByStepPlan: Array.isArray(parsed.stepByStepPlan) ? parsed.stepByStepPlan : defaultExplanation.stepByStepPlan,
+              stepByStepPlan: Array.isArray(parsed.stepByStepPlan) && parsed.stepByStepPlan.length > 0 ? parsed.stepByStepPlan : defaultExplanation.stepByStepPlan,
               invalidationTrigger: parsed.invalidationTrigger || defaultExplanation.invalidationTrigger,
               riskManagementTip: parsed.riskManagementTip || defaultExplanation.riskManagementTip,
             };
             break;
           }
         } catch (err: any) {
-          console.warn(`Gemini synthesis with ${model} failed (${err?.message}), checking next fallback...`);
+          console.warn(`Gemini synthesis with ${model} failed (${err?.message}), attempting fallback...`);
         }
       }
     }
 
-    // Build standard Telegram Markdown card
+    // Build standard Telegram formatted card
     const telegramCard = this.formatTelegramMessage(rawSetup, indicators, aiExplanation);
 
     return {
@@ -128,7 +142,7 @@ Respond with a JSON object strictly following this structure:
       return `📊 <b>Trading Assistant Response</b>\n\nI received your query: <i>"${userQuery}"</i>.\n\nTo generate a live trade setup, type <code>/setup XAUUSD</code>, <code>/setup BTC</code>, or <code>/scan</code> to check all high-probability market opportunities!`;
     }
 
-    const candidateModels = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview'];
     const prompt = `You are a private AI Trading Assistant on Telegram. The user asked: "${userQuery}".
 ${marketContext ? `Live Market Context: ${marketContext}` : ''}
 

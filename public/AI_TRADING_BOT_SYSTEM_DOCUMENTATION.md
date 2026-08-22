@@ -113,7 +113,7 @@ The bot supports rich HTML cards with interactive inline button keyboards:
   - Supports inline callback queries (`callback_data`) for instantaneous 1-click signal buttons.
   - Manages background price alert loop checking prices every 20 seconds.
 - **`geminiService.ts`**:
-  - Connects to `@google/genai` using `gemini-2.5-flash`.
+  - Connects to `@google/genai` using `gemini-3.7-flash` and `gemini-3.6-flash`.
   - Ingests quantitative metrics into structured system prompts for contextual institutional narrative synthesis.
 - **`server.ts`**:
   - Express server hosting REST endpoints, serving Vite frontend assets, and proxying Telegram bot commands.
