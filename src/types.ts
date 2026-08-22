@@ -147,12 +147,23 @@ export interface IndicatorData {
   smc?: SmartMoneyConcepts;
 }
 
+export type SetupState = 'ACTIVE_SETUP' | 'WATCHLIST' | 'STANDBY_NEUTRAL' | 'INVALIDATED';
+
+export interface ConfluenceFactor {
+  indicator: string;
+  conditionMet: string;
+  pointsAwarded: number;
+  maxPoints: number;
+  bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+}
+
 export interface TradeSetup {
   symbol: string;
   name: string;
   assetType: 'CRYPTO' | 'COMMODITY' | 'FOREX';
   timeframe: '15m' | '1h' | '4h' | '1d';
   action: 'LONG' | 'SHORT' | 'NEUTRAL';
+  setupState: SetupState;
   confluenceScore: number; // 1 to 10
   probabilityRating: 'HIGH_PROBABILITY' | 'MEDIUM_PROBABILITY' | 'LOW_PROBABILITY' | 'CHOPPY_AVOID';
   currentPrice: number;
@@ -162,7 +173,19 @@ export interface TradeSetup {
   takeProfit2: number;
   takeProfit3: number;
   riskRewardRatio: string; // e.g. "1:2.8"
-  riskPercent: number; // Risk percentage from entry to SL
+  riskPercent: number; // Stop-loss price distance percentage (legacy compatibility)
+  stopDistancePercent: number; // Distance in % from entry midpoint to SL
+  stopDistanceAbsolute: number; // Absolute price difference from entry midpoint to SL
+  suggestedRiskBudgetPercent: number; // Standard account capital risk recommendation (e.g., 1.5%)
+  positionSizeExample?: {
+    accountCapital: number;
+    riskBudgetUsd: number;
+    units: number;
+    positionValueUsd: number;
+    effectiveLeverage: number;
+  };
+  structuralWarnings?: string[];
+  confluenceBreakdown?: ConfluenceFactor[];
   technicalSummary: {
     trend: string;
     rsiStatus: string;

@@ -176,37 +176,60 @@ If they asked for an asset recommendation, give them clear instructions on how t
     indicators: IndicatorData,
     ai: TradeSetup['aiExplanation']
   ): string {
-    const actionEmoji = setup.action === 'LONG' ? '🟢 <b>LONG / BUY</b>' : setup.action === 'SHORT' ? '🔴 <b>SHORT / SELL</b>' : '🟡 <b>STANDBY / NEUTRAL</b>';
-    const scoreStars = '⭐'.repeat(Math.min(5, Math.ceil(setup.confluenceScore / 2)));
+    const isStandby = setup.setupState === 'STANDBY_NEUTRAL' || setup.action === 'NEUTRAL';
+    const actionEmoji = setup.action === 'LONG' ? '🟢 <b>LONG / BUY</b>' : setup.action === 'SHORT' ? '🔴 <b>SHORT / SELL</b>' : '🟡 <b>STANDBY / CONSOLIDATION</b>';
+    const scoreStars = '⭐'.repeat(Math.min(5, Math.max(1, Math.ceil(setup.confluenceScore / 2))));
 
-    return `🔥 <b>TRADING ASSISTANT SIGNAL | ${setup.symbol} (${setup.timeframe.toUpperCase()})</b>
+    if (isStandby) {
+      return `📊 <b>SULTAN-KING MARKET INTELLIGENCE | ${setup.symbol} (${setup.timeframe.toUpperCase()})</b>
+━━━━━━━━━━━━━━━━━━━━
+🎯 <b>Status:</b> 🟡 <b>STANDBY / NO ACTIVE SETUP</b>
+📊 <b>Confluence Score:</b> ${setup.confluenceScore}/10 ${scoreStars}
+💎 <b>Market Regime:</b> <code>${setup.probabilityRating.replace(/_/g, ' ')}</code>
+💰 <b>Live Price:</b> <code>$${setup.currentPrice.toLocaleString()}</code>
+
+🛡️ <b>CAPITAL PRESERVATION DIRECTIVE:</b>
+${ai.simpleRationale}
+
+📋 <b>MONITORING CHECKLIST:</b>
+${ai.stepByStepPlan.map((s) => `• ${s}`).join('\n')}
+
+⚠️ <b>STRUCTURAL WATCH:</b>
+• Range Boundaries: <code>Support $${setup.technicalSummary.support.toLocaleString()} | Resistance $${setup.technicalSummary.resistance.toLocaleString()}</code>
+• Rule: Do NOT force low-edge trades. Standby mode preserves dry powder for 8+/10 confluence opportunities.
+━━━━━━━━━━━━━━━━━━━━
+<i>Generated at ${new Date().toLocaleTimeString()} UTC • Sultan-King Deterministic Engine</i>`;
+    }
+
+    return `🔥 <b>SULTAN-KING VERIFIED SIGNAL | ${setup.symbol} (${setup.timeframe.toUpperCase()})</b>
 ━━━━━━━━━━━━━━━━━━━━
 🎯 <b>Action:</b> ${actionEmoji}
 📊 <b>Confluence Score:</b> ${setup.confluenceScore}/10 ${scoreStars}
-💎 <b>Setup Quality:</b> <code>${setup.probabilityRating.replace(/_/g, ' ')}</code>
+💎 <b>Setup Quality:</b> <code>${setup.probabilityRating.replace(/_/g, ' ')} [${setup.setupState}]</code>
 
 💰 <b>Live Price:</b> <code>$${setup.currentPrice.toLocaleString()}</code>
 📥 <b>Optimal Entry Zone:</b> <code>$${setup.entryZone[0].toLocaleString()} - $${setup.entryZone[1].toLocaleString()}</code>
-🛑 <b>Stop-Loss (SL):</b> <code>$${setup.stopLoss.toLocaleString()}</code> (-${setup.riskPercent}%)
+🛑 <b>Stop-Loss (SL):</b> <code>$${setup.stopLoss.toLocaleString()}</code>
+📏 <b>Price Stop Distance:</b> <code>${setup.stopDistancePercent}%</code> ($${setup.stopDistanceAbsolute.toLocaleString()})
 ⚖️ <b>Risk-to-Reward (R:R):</b> <code>${setup.riskRewardRatio}</code>
 
 🎯 <b>TAKE PROFIT TARGETS:</b>
   • <b>TP 1 (50% close):</b> <code>$${setup.takeProfit1.toLocaleString()}</code> (Move SL to Break-Even)
-  • <b>TP 2 (30% close):</b> <code>$${setup.takeProfit2.toLocaleString()}</code>
-  • <b>TP 3 (20% runner):</b> <code>$${setup.takeProfit3.toLocaleString()}</code>
+  • <b>TP 2 (30% close):</b> <code>$${setup.takeProfit2.toLocaleString()}</code> (Structural Target)
+  • <b>TP 3 (20% runner):</b> <code>$${setup.takeProfit3.toLocaleString()}</code> (Trend Expansion)
 
-🧠 <b>AI CONFLUENCE REASONING:</b>
+${setup.positionSizeExample ? `💼 <b>POSITION SIZING ($10K BASELINE @ 1.5% RISK):</b>
+  • Max Risk Budget: <code>$${setup.positionSizeExample.riskBudgetUsd}</code> (1.5% of account)
+  • Recommended Units: <code>${setup.positionSizeExample.units} units</code> ($${setup.positionSizeExample.positionValueUsd.toLocaleString()})
+` : ''}${setup.structuralWarnings && setup.structuralWarnings.length > 0 ? `⚠️ <b>STRUCTURAL WARNINGS:</b>\n${setup.structuralWarnings.map((w) => `  • ${w}`).join('\n')}\n` : ''}🧠 <b>CONFLUENCE REASONING:</b>
 ${ai.simpleRationale}
 
-📋 <b>EXECUTION PLAN:</b>
+📋 <b>EXECUTION DISCIPLINE:</b>
 ${ai.stepByStepPlan.map((s) => `• ${s}`).join('\n')}
 
-⚠️ <b>INVALIDATION:</b>
+🚫 <b>HARD INVALIDATION:</b>
 ${ai.invalidationTrigger}
-
-🛡️ <b>RISK RULE:</b>
-${ai.riskManagementTip}
 ━━━━━━━━━━━━━━━━━━━━
-<i>Generated at ${new Date().toLocaleTimeString()} UTC • Quantitative + Gemini Engine</i>`;
+<i>Generated at ${new Date().toLocaleTimeString()} UTC • Sultan-King Deterministic + Gemini Layer</i>`;
   }
 }

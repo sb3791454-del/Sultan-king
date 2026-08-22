@@ -126,6 +126,7 @@ async function runTests() {
     rsiSignal: 'BULLISH',
     rsi14: 58,
     macd: { line: 2, signal: 1, histogram: 1, crossover: 'BULLISH_CROSS' },
+    bollingerBands: { upper: 2100, middle: 2000, lower: 1900, bandwidth: 4.5, position: 'LOWER_HALF' },
   });
 
   assert(longSetup.action === 'LONG', 'Strong bullish indicators resolve to LONG action');
@@ -133,7 +134,7 @@ async function runTests() {
   assert(longSetup.takeProfit1 > longSetup.entryZone[1], 'LONG TP1 is strictly above entry zone');
   assert(longSetup.takeProfit2 > longSetup.takeProfit1, 'LONG TP2 is strictly above TP1');
   assert(longSetup.takeProfit3 > longSetup.takeProfit2, 'LONG TP3 is strictly above TP2');
-  assert(longSetup.confluenceScore >= 7, 'Confluence score reflects high bullish confluence');
+  assert(longSetup.confluenceScore >= 7, `Confluence score reflects high bullish confluence (got ${longSetup.confluenceScore})`);
 
   // ==========================================
   // SUITE 4: BACKTEST WIN/LOSS INTEGRITY & SINGLE-CANDLE RESOLUTION
@@ -152,6 +153,50 @@ async function runTests() {
       assert(trade.pnlPercent <= 0, `LOSS trade has strictly <= 0 PnL: ${trade.pnlPercent}%`);
     }
   }
+
+  // ==========================================
+  // SUITE 5: PHASE 2 STATE MACHINE & NEUTRAL STANDBY INVARIANCE
+  // ==========================================
+  console.log('\n--- SUITE 5: PHASE 2 STATE MACHINE & STANDBY INVARIANCE ---');
+
+  const neutralSetup = TradingEngine.generateQuantitativeSetup('ETHUSDT', 'CRYPTO', '1h', {
+    ...indicators,
+    emaTrend: 'NEUTRAL',
+    rsiSignal: 'NEUTRAL',
+    rsi14: 50,
+    macd: { line: 0, signal: 0, histogram: 0, crossover: 'NEUTRAL' },
+  });
+
+  assert(neutralSetup.setupState === 'STANDBY_NEUTRAL', 'Neutral indicators resolve to STANDBY_NEUTRAL state');
+  assert(neutralSetup.action === 'NEUTRAL', 'Action is strictly NEUTRAL');
+  assert(neutralSetup.entryZone[0] === 0 && neutralSetup.entryZone[1] === 0, 'No executable entry zone generated for neutral setup');
+  assert(neutralSetup.stopLoss === 0, 'Stop loss is 0 for neutral setup (no phantom levels)');
+  assert(neutralSetup.takeProfit1 === 0 && neutralSetup.takeProfit2 === 0, 'Take profit targets are 0 for neutral setup');
+  assert(neutralSetup.riskRewardRatio === 'N/A', 'Risk reward ratio is N/A for neutral setup');
+
+  // ==========================================
+  // SUITE 6: 10-POINT CONFLUENCE ENGINE & BREAKDOWN AUDIT
+  // ==========================================
+  console.log('\n--- SUITE 6: 10-POINT CONFLUENCE ENGINE & BREAKDOWN AUDIT ---');
+
+  assert(Array.isArray(longSetup.confluenceBreakdown), 'Confluence breakdown is an array');
+  assert(longSetup.confluenceBreakdown!.length > 0, 'Confluence breakdown items are populated');
+  
+  const totalAwarded = longSetup.confluenceBreakdown!.reduce((sum, item) => sum + item.pointsAwarded, 0);
+  assert(totalAwarded > 0, 'Total points awarded is strictly positive');
+  assert(longSetup.confluenceScore <= 10.0, 'Confluence score is capped at 10.0');
+
+  // ==========================================
+  // SUITE 7: SEPARATION OF PRICE STOP DISTANCE VS ACCOUNT RISK & POSITION SIZING
+  // ==========================================
+  console.log('\n--- SUITE 7: PRICE STOP DISTANCE VS ACCOUNT RISK & POSITION SIZING ---');
+
+  assert(longSetup.stopDistanceAbsolute > 0, 'stopDistanceAbsolute is strictly positive for active setup');
+  assert(longSetup.stopDistancePercent > 0, 'stopDistancePercent is strictly positive');
+  assert(longSetup.suggestedRiskBudgetPercent === 1.5, 'suggestedRiskBudgetPercent is strictly defined at 1.5%');
+  assert(longSetup.positionSizeExample !== undefined, 'positionSizeExample is generated for active setup');
+  assert(longSetup.positionSizeExample!.riskBudgetUsd === 150, '$10,000 baseline at 1.5% allocates exact $150 risk budget');
+  assert(longSetup.positionSizeExample!.units > 0, 'Calculated position units is strictly > 0');
 
   // ==========================================
   // SUMMARY

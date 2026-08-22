@@ -216,7 +216,8 @@ export class TradingEngine {
   }
 
   /**
-   * Generates a fully mathematically verified trade setup with strict risk-to-reward ratio
+   * Generates a fully mathematically verified trade setup with strict risk-to-reward ratio,
+   * 10-point deterministic confluence weighting, state machine, and structural S/R clearance checks.
    */
   public static generateQuantitativeSetup(
     symbolName: string,
@@ -225,111 +226,412 @@ export class TradingEngine {
     indicators: IndicatorData,
     decimals = 2
   ): Omit<TradeSetup, 'aiExplanation' | 'telegramFormattedCard'> {
-    const { currentPrice, rsi14, rsiSignal, emaTrend, macd, bollingerBands, atr14, swingHigh, swingLow, supportLevels, resistanceLevels } = indicators;
+    const { currentPrice, rsi14, rsiSignal, emaTrend, macd, bollingerBands, atr14, swingHigh, swingLow, supportLevels, resistanceLevels, smc } = indicators;
 
-    // Confluence Scoring Algorithm (1 to 10)
-    let bullishScore = 0;
-    let bearishScore = 0;
+    // --- 10-POINT DETERMINISTIC CONFLUENCE ENGINE ---
+    const confluenceBreakdown: TradeSetup['confluenceBreakdown'] = [];
+    let bullishPoints = 0;
+    let bearishPoints = 0;
 
-    // EMA trend score
-    if (emaTrend === 'STRONG_BULLISH') bullishScore += 3;
-    else if (emaTrend === 'BULLISH') bullishScore += 2;
-    else if (emaTrend === 'STRONG_BEARISH') bearishScore += 3;
-    else if (emaTrend === 'BEARISH') bearishScore += 2;
-
-    // RSI momentum score
-    if (rsiSignal === 'OVERSOLD') bullishScore += 2.5;
-    else if (rsiSignal === 'BULLISH' && rsi14 < 65) bullishScore += 1.5;
-    else if (rsiSignal === 'OVERBOUGHT') bearishScore += 2.5;
-    else if (rsiSignal === 'BEARISH' && rsi14 > 35) bearishScore += 1.5;
-
-    // MACD score
-    if (macd.crossover === 'BULLISH_CROSS') bullishScore += 2.5;
-    else if (macd.crossover === 'BULLISH_EXPANDING') bullishScore += 1.5;
-    else if (macd.crossover === 'BEARISH_CROSS') bearishScore += 2.5;
-    else if (macd.crossover === 'BEARISH_EXPANDING') bearishScore += 1.5;
-
-    // Bollinger Band positioning
-    if (bollingerBands.position === 'BELOW_LOWER' || bollingerBands.position === 'LOWER_HALF') bullishScore += 1;
-    if (bollingerBands.position === 'ABOVE_UPPER' || bollingerBands.position === 'UPPER_HALF') bearishScore += 1;
-
-    let action: 'LONG' | 'SHORT' | 'NEUTRAL' = 'NEUTRAL';
-    let confluenceScore = 5;
-
-    if (bullishScore >= bearishScore + 2 && bullishScore >= 4) {
-      action = 'LONG';
-      confluenceScore = Math.min(10, Math.round(bullishScore + 2));
-    } else if (bearishScore >= bullishScore + 2 && bearishScore >= 4) {
-      action = 'SHORT';
-      confluenceScore = Math.min(10, Math.round(bearishScore + 2));
+    // 1. EMA Multi-Trend Alignment (Max 2.5 pts)
+    if (emaTrend === 'STRONG_BULLISH') {
+      bullishPoints += 2.5;
+      confluenceBreakdown.push({
+        indicator: 'EMA Multi-Trend Alignment',
+        conditionMet: 'Price > EMA20 > EMA50 > EMA200 (Strong Bullish Stack)',
+        pointsAwarded: 2.5,
+        maxPoints: 2.5,
+        bias: 'BULLISH',
+      });
+    } else if (emaTrend === 'BULLISH') {
+      bullishPoints += 1.5;
+      confluenceBreakdown.push({
+        indicator: 'EMA Multi-Trend Alignment',
+        conditionMet: 'EMA20 > EMA50 (Bullish Momentum)',
+        pointsAwarded: 1.5,
+        maxPoints: 2.5,
+        bias: 'BULLISH',
+      });
+    } else if (emaTrend === 'STRONG_BEARISH') {
+      bearishPoints += 2.5;
+      confluenceBreakdown.push({
+        indicator: 'EMA Multi-Trend Alignment',
+        conditionMet: 'Price < EMA20 < EMA50 < EMA200 (Strong Bearish Stack)',
+        pointsAwarded: 2.5,
+        maxPoints: 2.5,
+        bias: 'BEARISH',
+      });
+    } else if (emaTrend === 'BEARISH') {
+      bearishPoints += 1.5;
+      confluenceBreakdown.push({
+        indicator: 'EMA Multi-Trend Alignment',
+        conditionMet: 'EMA20 < EMA50 (Bearish Momentum)',
+        pointsAwarded: 1.5,
+        maxPoints: 2.5,
+        bias: 'BEARISH',
+      });
     } else {
-      action = 'NEUTRAL';
-      confluenceScore = 4;
+      confluenceBreakdown.push({
+        indicator: 'EMA Multi-Trend Alignment',
+        conditionMet: 'EMAs Flat / Tangled (Consolidation)',
+        pointsAwarded: 0,
+        maxPoints: 2.5,
+        bias: 'NEUTRAL',
+      });
     }
 
-    let probabilityRating: TradeSetup['probabilityRating'] = 'MEDIUM_PROBABILITY';
-    if (confluenceScore >= 8) probabilityRating = 'HIGH_PROBABILITY';
-    else if (confluenceScore >= 6) probabilityRating = 'MEDIUM_PROBABILITY';
-    else if (confluenceScore >= 4) probabilityRating = 'LOW_PROBABILITY';
+    // 2. RSI Momentum & Regime (Max 2.0 pts)
+    if (rsiSignal === 'OVERSOLD' || rsi14 <= 30) {
+      bullishPoints += 2.0;
+      confluenceBreakdown.push({
+        indicator: 'RSI(14) Momentum & Regime',
+        conditionMet: `RSI oversold at ${rsi14.toFixed(1)} (Mean-reversion bounce expected)`,
+        pointsAwarded: 2.0,
+        maxPoints: 2.0,
+        bias: 'BULLISH',
+      });
+    } else if (rsiSignal === 'OVERBOUGHT' || rsi14 >= 70) {
+      bearishPoints += 2.0;
+      confluenceBreakdown.push({
+        indicator: 'RSI(14) Momentum & Regime',
+        conditionMet: `RSI overbought at ${rsi14.toFixed(1)} (Mean-reversion pullback expected)`,
+        pointsAwarded: 2.0,
+        maxPoints: 2.0,
+        bias: 'BEARISH',
+      });
+    } else if (rsiSignal === 'BULLISH' && rsi14 > 50 && rsi14 < 68) {
+      bullishPoints += 1.5;
+      confluenceBreakdown.push({
+        indicator: 'RSI(14) Momentum & Regime',
+        conditionMet: `RSI bullish expansion at ${rsi14.toFixed(1)} (Healthy momentum)`,
+        pointsAwarded: 1.5,
+        maxPoints: 2.0,
+        bias: 'BULLISH',
+      });
+    } else if (rsiSignal === 'BEARISH' && rsi14 < 50 && rsi14 > 32) {
+      bearishPoints += 1.5;
+      confluenceBreakdown.push({
+        indicator: 'RSI(14) Momentum & Regime',
+        conditionMet: `RSI bearish pressure at ${rsi14.toFixed(1)} (Healthy downside momentum)`,
+        pointsAwarded: 1.5,
+        maxPoints: 2.0,
+        bias: 'BEARISH',
+      });
+    } else {
+      confluenceBreakdown.push({
+        indicator: 'RSI(14) Momentum & Regime',
+        conditionMet: `RSI neutral at ${rsi14.toFixed(1)}`,
+        pointsAwarded: 0.5,
+        maxPoints: 2.0,
+        bias: 'NEUTRAL',
+      });
+    }
+
+    // 3. MACD Momentum & Histogram Crossover (Max 2.0 pts)
+    if (macd.crossover === 'BULLISH_CROSS') {
+      bullishPoints += 2.0;
+      confluenceBreakdown.push({
+        indicator: 'MACD Momentum Crossover',
+        conditionMet: 'MACD Line crossed above Signal (Fresh Bullish Cross)',
+        pointsAwarded: 2.0,
+        maxPoints: 2.0,
+        bias: 'BULLISH',
+      });
+    } else if (macd.crossover === 'BULLISH_EXPANDING') {
+      bullishPoints += 1.5;
+      confluenceBreakdown.push({
+        indicator: 'MACD Momentum Crossover',
+        conditionMet: `MACD Histogram expanding bullish (+${macd.histogram.toFixed(2)})`,
+        pointsAwarded: 1.5,
+        maxPoints: 2.0,
+        bias: 'BULLISH',
+      });
+    } else if (macd.crossover === 'BEARISH_CROSS') {
+      bearishPoints += 2.0;
+      confluenceBreakdown.push({
+        indicator: 'MACD Momentum Crossover',
+        conditionMet: 'MACD Line crossed below Signal (Fresh Bearish Cross)',
+        pointsAwarded: 2.0,
+        maxPoints: 2.0,
+        bias: 'BEARISH',
+      });
+    } else if (macd.crossover === 'BEARISH_EXPANDING') {
+      bearishPoints += 1.5;
+      confluenceBreakdown.push({
+        indicator: 'MACD Momentum Crossover',
+        conditionMet: `MACD Histogram expanding bearish (${macd.histogram.toFixed(2)})`,
+        pointsAwarded: 1.5,
+        maxPoints: 2.0,
+        bias: 'BEARISH',
+      });
+    } else {
+      confluenceBreakdown.push({
+        indicator: 'MACD Momentum Crossover',
+        conditionMet: 'MACD flat / no momentum',
+        pointsAwarded: 0,
+        maxPoints: 2.0,
+        bias: 'NEUTRAL',
+      });
+    }
+
+    // 4. Bollinger Bands Positioning & Volatility Reversion (Max 1.0 pts)
+    if (bollingerBands.position === 'BELOW_LOWER') {
+      bullishPoints += 1.0;
+      confluenceBreakdown.push({
+        indicator: 'Bollinger Band Position',
+        conditionMet: 'Price below Lower Band (Extreme oversold extension)',
+        pointsAwarded: 1.0,
+        maxPoints: 1.0,
+        bias: 'BULLISH',
+      });
+    } else if (bollingerBands.position === 'LOWER_HALF') {
+      bullishPoints += 0.5;
+      confluenceBreakdown.push({
+        indicator: 'Bollinger Band Position',
+        conditionMet: 'Price in lower half (Demand accumulation zone)',
+        pointsAwarded: 0.5,
+        maxPoints: 1.0,
+        bias: 'BULLISH',
+      });
+    } else if (bollingerBands.position === 'ABOVE_UPPER') {
+      bearishPoints += 1.0;
+      confluenceBreakdown.push({
+        indicator: 'Bollinger Band Position',
+        conditionMet: 'Price above Upper Band (Extreme overbought extension)',
+        pointsAwarded: 1.0,
+        maxPoints: 1.0,
+        bias: 'BEARISH',
+      });
+    } else if (bollingerBands.position === 'UPPER_HALF') {
+      bearishPoints += 0.5;
+      confluenceBreakdown.push({
+        indicator: 'Bollinger Band Position',
+        conditionMet: 'Price in upper half (Supply distribution zone)',
+        pointsAwarded: 0.5,
+        maxPoints: 1.0,
+        bias: 'BEARISH',
+      });
+    } else {
+      confluenceBreakdown.push({
+        indicator: 'Bollinger Band Position',
+        conditionMet: 'Bollinger Squeeze (Volatility consolidation)',
+        pointsAwarded: 0.5,
+        maxPoints: 1.0,
+        bias: 'NEUTRAL',
+      });
+    }
+
+    // 5. Smart Money Concepts: Order Blocks & FVG Imbalance (Max 1.5 pts)
+    const hasBullishOB = smc?.orderBlocks.some((ob) => ob.type === 'BULLISH_OB' && !ob.mitigated);
+    const hasBearishOB = smc?.orderBlocks.some((ob) => ob.type === 'BEARISH_OB' && !ob.mitigated);
+    const hasBullishFVG = smc?.fairValueGaps.some((f) => f.type === 'BULLISH_FVG' && !f.mitigated);
+    const hasBearishFVG = smc?.fairValueGaps.some((f) => f.type === 'BEARISH_FVG' && !f.mitigated);
+
+    if (hasBullishOB || hasBullishFVG || smc?.marketStructure.trend === 'BULLISH_BOS') {
+      bullishPoints += 1.5;
+      confluenceBreakdown.push({
+        indicator: 'Smart Money Concepts (SMC)',
+        conditionMet: hasBullishOB ? 'Unmitigated Bullish Order Block + Imbalance' : 'Bullish Market Structure Shift (BOS/CHOCH)',
+        pointsAwarded: 1.5,
+        maxPoints: 1.5,
+        bias: 'BULLISH',
+      });
+    } else if (hasBearishOB || hasBearishFVG || smc?.marketStructure.trend === 'BEARISH_BOS') {
+      bearishPoints += 1.5;
+      confluenceBreakdown.push({
+        indicator: 'Smart Money Concepts (SMC)',
+        conditionMet: hasBearishOB ? 'Unmitigated Bearish Order Block + Imbalance' : 'Bearish Market Structure Shift (BOS/CHOCH)',
+        pointsAwarded: 1.5,
+        maxPoints: 1.5,
+        bias: 'BEARISH',
+      });
+    } else {
+      confluenceBreakdown.push({
+        indicator: 'Smart Money Concepts (SMC)',
+        conditionMet: 'No fresh institutional imbalances detected',
+        pointsAwarded: 0,
+        maxPoints: 1.5,
+        bias: 'NEUTRAL',
+      });
+    }
+
+    // 6. Volatility Clearance & ATR Expansion (Max 1.0 pts)
+    if (atr14 > 0 && bollingerBands.bandwidth >= 1.5) {
+      const volPoints = 1.0;
+      if (bullishPoints >= bearishPoints) bullishPoints += volPoints;
+      else bearishPoints += volPoints;
+
+      confluenceBreakdown.push({
+        indicator: 'Volatility & ATR Clearance',
+        conditionMet: `ATR(14) active at ${atr14.toFixed(decimals)} (Healthy trading expansion)`,
+        pointsAwarded: 1.0,
+        maxPoints: 1.0,
+        bias: bullishPoints >= bearishPoints ? 'BULLISH' : 'BEARISH',
+      });
+    } else {
+      confluenceBreakdown.push({
+        indicator: 'Volatility & ATR Clearance',
+        conditionMet: 'Compressed ATR / Flat Volatility',
+        pointsAwarded: 0.3,
+        maxPoints: 1.0,
+        bias: 'NEUTRAL',
+      });
+    }
+
+    // --- DIRECTIONAL DECISION & SCORE RESOLUTION ---
+    let action: TradeSetup['action'] = 'NEUTRAL';
+    let confluenceScore = 4.0;
+
+    if (bullishPoints >= 6.0 && bullishPoints >= bearishPoints + 1.5) {
+      action = 'LONG';
+      confluenceScore = Math.min(10.0, Math.round(bullishPoints * 10) / 10);
+    } else if (bearishPoints >= 6.0 && bearishPoints >= bullishPoints + 1.5) {
+      action = 'SHORT';
+      confluenceScore = Math.min(10.0, Math.round(bearishPoints * 10) / 10);
+    } else {
+      action = 'NEUTRAL';
+      confluenceScore = Math.min(5.5, Math.round(Math.max(bullishPoints, bearishPoints) * 10) / 10);
+    }
+
+    // --- FORMAL TRADE SETUP STATE MACHINE ---
+    let setupState: TradeSetup['setupState'] = 'STANDBY_NEUTRAL';
+    if (action !== 'NEUTRAL') {
+      if (confluenceScore >= 7.5) {
+        setupState = 'ACTIVE_SETUP';
+      } else if (confluenceScore >= 6.0) {
+        setupState = 'WATCHLIST';
+      } else {
+        setupState = 'STANDBY_NEUTRAL';
+      }
+    } else {
+      setupState = 'STANDBY_NEUTRAL';
+    }
+
+    // Probability Rating
+    let probabilityRating: TradeSetup['probabilityRating'] = 'CHOPPY_AVOID';
+    if (confluenceScore >= 8.0) probabilityRating = 'HIGH_PROBABILITY';
+    else if (confluenceScore >= 6.0) probabilityRating = 'MEDIUM_PROBABILITY';
+    else if (confluenceScore >= 4.0) probabilityRating = 'LOW_PROBABILITY';
     else probabilityRating = 'CHOPPY_AVOID';
 
-    // Risk Management Calculations
-    // ATR buffer with mathematical 1.4x factor to clear intraday spread & market noise
+    // --- RISK & LEVEL CALCULATIONS ---
+    const structuralWarnings: string[] = [];
     const atrBuffer = atr14 > 0 ? atr14 * 1.4 : currentPrice * 0.015;
-    let entryZone: [number, number];
-    let stopLoss: number;
-    let takeProfit1: number;
-    let takeProfit2: number;
-    let takeProfit3: number;
-    let riskRewardRatio = '1:2.4';
-    let riskPercent = 1.5;
 
-    if (action === 'LONG') {
+    let entryZone: [number, number] = [0, 0];
+    let stopLoss = 0;
+    let takeProfit1 = 0;
+    let takeProfit2 = 0;
+    let takeProfit3 = 0;
+    let riskRewardRatio = 'N/A';
+    let stopDistancePercent = 0;
+    let stopDistanceAbsolute = 0;
+    const suggestedRiskBudgetPercent = 1.5;
+
+    let positionSizeExample: TradeSetup['positionSizeExample'] = undefined;
+
+    if (action === 'LONG' && setupState !== 'STANDBY_NEUTRAL') {
       const lowerEntry = this.roundToDecimals(currentPrice * 0.996, decimals);
       const upperEntry = this.roundToDecimals(currentPrice * 1.002, decimals);
       entryZone = [lowerEntry, upperEntry];
       const midpointEntry = (lowerEntry + upperEntry) / 2;
 
-      // SL below structural swing low or ATR buffer (whichever gives safer clearance)
+      // Stop-loss strictly below structural swing low or ATR buffer
       const structuralLow = swingLow > 0 && swingLow < currentPrice ? swingLow : currentPrice - atrBuffer;
       stopLoss = this.roundToDecimals(Math.min(structuralLow * 0.997, currentPrice - atrBuffer), decimals);
 
-      // Mathematical Risk from midpoint execution
-      const riskDistanceMid = Math.max(0.0001, midpointEntry - stopLoss);
-      takeProfit1 = this.roundToDecimals(midpointEntry + riskDistanceMid * 1.2, decimals); // 1.2R (Breakeven pivot)
-      takeProfit2 = this.roundToDecimals(midpointEntry + riskDistanceMid * 2.4, decimals); // 2.4R (Structural target)
-      takeProfit3 = this.roundToDecimals(midpointEntry + riskDistanceMid * 3.6, decimals); // 3.6R (Trend expansion)
+      stopDistanceAbsolute = this.roundToDecimals(Math.max(0.0001, midpointEntry - stopLoss), decimals);
+      stopDistancePercent = this.roundToDecimals((stopDistanceAbsolute / midpointEntry) * 100, 2);
 
-      const rr = ((takeProfit2 - midpointEntry) / riskDistanceMid).toFixed(1);
+      takeProfit1 = this.roundToDecimals(midpointEntry + stopDistanceAbsolute * 1.2, decimals);
+      takeProfit2 = this.roundToDecimals(midpointEntry + stopDistanceAbsolute * 2.4, decimals);
+      takeProfit3 = this.roundToDecimals(midpointEntry + stopDistanceAbsolute * 3.6, decimals);
+
+      const rr = ((takeProfit2 - midpointEntry) / stopDistanceAbsolute).toFixed(1);
       riskRewardRatio = `1:${rr}`;
-      riskPercent = this.roundToDecimals(((midpointEntry - stopLoss) / midpointEntry) * 100, 2);
-    } else if (action === 'SHORT') {
+
+      // Structural Clearance Check: Verify resistance isn't blocking TP1
+      const nearestResistance = resistanceLevels.find((r) => r > midpointEntry && r <= takeProfit1);
+      if (nearestResistance) {
+        structuralWarnings.push(`Key overhead resistance at $${nearestResistance} sits inside TP1 zone. Consider scaling out early if price stalls.`);
+      }
+
+      if (stopDistancePercent > 6.0) {
+        structuralWarnings.push(`Wide volatility stop distance (${stopDistancePercent}%). Downsize unit allocation to keep account loss capped at ${suggestedRiskBudgetPercent}%.`);
+      }
+
+      // Position sizing example ($10,000 baseline capital, 1.5% dollar risk budget)
+      const accountCapital = 10000;
+      const riskBudgetUsd = accountCapital * (suggestedRiskBudgetPercent / 100);
+      const units = this.roundToDecimals(riskBudgetUsd / stopDistanceAbsolute, 4);
+      const positionValueUsd = this.roundToDecimals(units * midpointEntry, 2);
+      const effectiveLeverage = this.roundToDecimals(positionValueUsd / accountCapital, 2);
+
+      positionSizeExample = {
+        accountCapital,
+        riskBudgetUsd,
+        units,
+        positionValueUsd,
+        effectiveLeverage,
+      };
+    } else if (action === 'SHORT' && setupState !== 'STANDBY_NEUTRAL') {
       const lowerEntry = this.roundToDecimals(currentPrice * 0.998, decimals);
       const upperEntry = this.roundToDecimals(currentPrice * 1.004, decimals);
       entryZone = [lowerEntry, upperEntry];
       const midpointEntry = (lowerEntry + upperEntry) / 2;
 
-      // SL above structural swing high or ATR buffer
+      // Stop-loss strictly above structural swing high or ATR buffer
       const structuralHigh = swingHigh > 0 && swingHigh > currentPrice ? swingHigh : currentPrice + atrBuffer;
       stopLoss = this.roundToDecimals(Math.max(structuralHigh * 1.003, currentPrice + atrBuffer), decimals);
 
-      const riskDistanceMid = Math.max(0.0001, stopLoss - midpointEntry);
-      takeProfit1 = this.roundToDecimals(midpointEntry - riskDistanceMid * 1.2, decimals);
-      takeProfit2 = this.roundToDecimals(midpointEntry - riskDistanceMid * 2.4, decimals);
-      takeProfit3 = this.roundToDecimals(midpointEntry - riskDistanceMid * 3.6, decimals);
+      stopDistanceAbsolute = this.roundToDecimals(Math.max(0.0001, stopLoss - midpointEntry), decimals);
+      stopDistancePercent = this.roundToDecimals((stopDistanceAbsolute / midpointEntry) * 100, 2);
 
-      const rr = ((midpointEntry - takeProfit2) / riskDistanceMid).toFixed(1);
+      takeProfit1 = this.roundToDecimals(midpointEntry - stopDistanceAbsolute * 1.2, decimals);
+      takeProfit2 = this.roundToDecimals(midpointEntry - stopDistanceAbsolute * 2.4, decimals);
+      takeProfit3 = this.roundToDecimals(midpointEntry - stopDistanceAbsolute * 3.6, decimals);
+
+      const rr = ((midpointEntry - takeProfit2) / stopDistanceAbsolute).toFixed(1);
       riskRewardRatio = `1:${rr}`;
-      riskPercent = this.roundToDecimals(((stopLoss - midpointEntry) / midpointEntry) * 100, 2);
+
+      // Structural Clearance Check: Verify support isn't blocking TP1
+      const nearestSupport = supportLevels.find((s) => s < midpointEntry && s >= takeProfit1);
+      if (nearestSupport) {
+        structuralWarnings.push(`Key demand support at $${nearestSupport} sits inside TP1 zone. Watch for early bounce reactions.`);
+      }
+
+      if (stopDistancePercent > 6.0) {
+        structuralWarnings.push(`Wide volatility stop distance (${stopDistancePercent}%). Downsize unit allocation to keep account loss capped at ${suggestedRiskBudgetPercent}%.`);
+      }
+
+      const accountCapital = 10000;
+      const riskBudgetUsd = accountCapital * (suggestedRiskBudgetPercent / 100);
+      const units = this.roundToDecimals(riskBudgetUsd / stopDistanceAbsolute, 4);
+      const positionValueUsd = this.roundToDecimals(units * midpointEntry, 2);
+      const effectiveLeverage = this.roundToDecimals(positionValueUsd / accountCapital, 2);
+
+      positionSizeExample = {
+        accountCapital,
+        riskBudgetUsd,
+        units,
+        positionValueUsd,
+        effectiveLeverage,
+      };
     } else {
-      // Neutral Standby
-      entryZone = [this.roundToDecimals(currentPrice * 0.995, decimals), this.roundToDecimals(currentPrice * 1.005, decimals)];
-      stopLoss = this.roundToDecimals(currentPrice * 0.985, decimals);
-      takeProfit1 = this.roundToDecimals(currentPrice * 1.02, decimals);
-      takeProfit2 = this.roundToDecimals(currentPrice * 1.04, decimals);
-      takeProfit3 = this.roundToDecimals(currentPrice * 1.06, decimals);
-      riskRewardRatio = '1:2.0';
-      riskPercent = 1.5;
+      // STANDBY_NEUTRAL: No phantom executable levels
+      entryZone = [0, 0];
+      stopLoss = 0;
+      takeProfit1 = 0;
+      takeProfit2 = 0;
+      takeProfit3 = 0;
+      riskRewardRatio = 'N/A';
+      stopDistancePercent = 0;
+      stopDistanceAbsolute = 0;
+      structuralWarnings.push('Market is in low-confluence consolidation. Standby mode active — preserve capital.');
+    }
+
+    if (bollingerBands.bandwidth < 2.0) {
+      structuralWarnings.push('Bollinger Band Squeeze (<2% width): High-volatility breakout imminent.');
     }
 
     return {
@@ -338,6 +640,7 @@ export class TradingEngine {
       assetType,
       timeframe,
       action,
+      setupState,
       confluenceScore,
       probabilityRating,
       currentPrice: this.roundToDecimals(currentPrice, decimals),
@@ -347,7 +650,13 @@ export class TradingEngine {
       takeProfit2,
       takeProfit3,
       riskRewardRatio,
-      riskPercent,
+      riskPercent: stopDistancePercent,
+      stopDistancePercent,
+      stopDistanceAbsolute,
+      suggestedRiskBudgetPercent,
+      positionSizeExample,
+      structuralWarnings,
+      confluenceBreakdown,
       technicalSummary: {
         trend: emaTrend.replace(/_/g, ' '),
         rsiStatus: `RSI(14): ${rsi14.toFixed(1)} (${rsiSignal})`,
@@ -355,7 +664,7 @@ export class TradingEngine {
         volatilityStatus: `ATR(14): ${atr14.toFixed(decimals)} | Bandwidth: ${bollingerBands.bandwidth.toFixed(2)}%`,
         support: supportLevels[0] || swingLow,
         resistance: resistanceLevels[0] || swingHigh,
-        smcStructure: indicators.smc?.marketStructure.structuralBias || 'Neutral Consolidation',
+        smcStructure: smc?.marketStructure.structuralBias || 'Neutral Consolidation',
       },
       generatedAt: new Date().toISOString(),
     };
@@ -1088,32 +1397,12 @@ export class TradingEngine {
           worstCaseRR: `1:${worstCaseRR}`,
           displayedRR: setup.riskRewardRatio,
         },
-        confluenceBreakdown: [
-          {
-            indicator: 'EMA Trend Alignment',
-            conditionMet: indicators.emaTrend,
-            points: indicators.emaTrend.includes('STRONG') ? 3 : indicators.emaTrend !== 'NEUTRAL' ? 2 : 0,
-            side: indicators.emaTrend.includes('BULL') ? 'BULLISH' : 'BEARISH',
-          },
-          {
-            indicator: 'RSI(14) Momentum Oscillator',
-            conditionMet: `${indicators.rsi14.toFixed(1)} (${indicators.rsiSignal})`,
-            points: indicators.rsiSignal === 'OVERSOLD' || indicators.rsiSignal === 'OVERBOUGHT' ? 2.5 : 1.5,
-            side: indicators.rsiSignal === 'BULLISH' || indicators.rsiSignal === 'OVERSOLD' ? 'BULLISH' : 'BEARISH',
-          },
-          {
-            indicator: 'MACD Momentum Crossover',
-            conditionMet: indicators.macd.crossover,
-            points: indicators.macd.crossover.includes('CROSS') ? 2.5 : 1.5,
-            side: indicators.macd.crossover.includes('BULLISH') ? 'BULLISH' : 'BEARISH',
-          },
-          {
-            indicator: 'Bollinger Band Position',
-            conditionMet: indicators.bollingerBands.position,
-            points: 1.0,
-            side: indicators.bollingerBands.position.includes('LOWER') ? 'BULLISH' : 'BEARISH',
-          },
-        ],
+        confluenceBreakdown: (setup.confluenceBreakdown || []).map((item) => ({
+          indicator: item.indicator,
+          conditionMet: item.conditionMet,
+          points: item.pointsAwarded,
+          side: item.bias === 'BULLISH' ? ('BULLISH' as const) : ('BEARISH' as const),
+        })),
         smcProof: {
           orderBlocksProof: (indicators.smc?.orderBlocks || []).map((ob) => ({
             index: ob.candleIndex,

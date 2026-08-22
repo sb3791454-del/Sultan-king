@@ -235,11 +235,19 @@ export class TelegramBotService {
       return true;
     }
 
-    const whitelist = allowed.split(',').map((u) => u.trim().replace(/^@/, '').toLowerCase());
-    const idStr = userId ? String(userId).toLowerCase() : '';
-    const userStr = username ? username.toLowerCase() : '';
+    const whitelist = allowed
+      .split(/[,;\s]+/)
+      .map((u) => u.trim().replace(/^["']|["']$/g, '').replace(/^@/, '').toLowerCase())
+      .filter((u) => u.length > 0);
 
-    return whitelist.includes(idStr) || (!!userStr && whitelist.includes(userStr));
+    const idStr = userId ? String(userId).trim().toLowerCase() : '';
+    const userStr = username ? username.trim().toLowerCase() : '';
+
+    const isMatch = whitelist.includes(idStr) || (!!userStr && whitelist.includes(userStr));
+    if (!isMatch) {
+      console.warn(`[Telegram Auth Check] User ${idStr} (@${userStr}) not in whitelist: [${whitelist.join(', ')}]`);
+    }
+    return isMatch;
   }
 
   /**
