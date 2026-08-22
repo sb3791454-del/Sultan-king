@@ -1,0 +1,199 @@
+<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+<head>
+<meta charset="utf-8">
+<title>AI Trading Bot - Full System Specification & Architecture Manual</title>
+<style>
+  body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; line-height: 1.6; color: #1e293b; margin: 40px; }
+  h1 { font-size: 22pt; color: #0f172a; border-bottom: 2px solid #f59e0b; padding-bottom: 8px; }
+  h2 { font-size: 16pt; color: #0f172a; margin-top: 24px; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; }
+  h3 { font-size: 13pt; color: #b45309; margin-top: 16px; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 10pt; }
+  th, td { border: 1px solid #cbd5e1; padding: 8px 12px; text-align: left; }
+  th { background-color: #f8fafc; color: #0f172a; font-weight: bold; }
+  code { font-family: Consolas, monospace; background-color: #f1f5f9; padding: 2px 5px; border-radius: 4px; color: #b45309; }
+  pre { background-color: #0f172a; color: #f8fafc; padding: 14px; border-radius: 6px; font-family: Consolas, monospace; font-size: 9.5pt; overflow-x: auto; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 9pt; }
+  .badge-bull { background-color: #dcfce7; color: #15803d; }
+  .badge-warn { background-color: #fef3c7; color: #b45309; }
+  .badge-bear { background-color: #fee2e2; color: #b91c1c; }
+  .highlight { background-color: #fffbeb; border-left: 4px solid #f59e0b; padding: 12px; margin: 16px 0; }
+</style>
+</head>
+<body>
+
+<h1>QUANTITATIVE AI TRADING ASSISTANT & TELEGRAM BOT</h1>
+<p><strong>Full Technical Specification, Architecture, & Handoff Manual for AI Reviewers</strong></p>
+
+<div class="highlight">
+  <strong>Summary:</strong> This document contains the full architecture, quantitative logic, Smart Money Concepts (SMC) engine, multi-timeframe scoring algorithm, Telegram bot integration, and API catalog of the AI Trading System. You can directly share or paste this document into ChatGPT, Claude, or any LLM to explain the exact system implementation.
+</div>
+
+<h2>1. Executive System Overview</h2>
+<p>This application is a 24/7 institutional-grade Quantitative Trading Engine and Autonomous Telegram Assistant built with <strong>React 18 + TypeScript + Tailwind CSS</strong> on the client and <strong>Node.js + Express</strong> on the server. The platform delivers high-probability trade setups across Crypto, Gold (XAU/USD), and Forex using live market feeds, institutional Smart Money Concepts (SMC), and Google Gemini AI.</p>
+
+<h2>2. Full-Stack Architectural Blueprint</h2>
+<pre>
++-----------------------------------------------------------------------------+
+|                                CLIENT LAYER                                 |
+|  React 18 + Tailwind CSS + Lucide Icons + Vite SPA                         |
+|  - Precision Signal Analyzer & Dynamic Candlestick Chart View               |
+|  - Quant & Macro Hub (MTF Matrix, Fear & Greed, Funding Squeeze, Backtest)  |
+|  - Market Scanner (Multi-Asset Auto-Confluence Ranking)                     |
+|  - Position Size & Risk Calculator (ATR-based Volatility Sizing)            |
+|  - Live Telegram Simulator & 24/7 Diagnostics Log Stream                    |
++-----------------------------------------------------------------------------+
+                                      |  HTTP & REST APIs
++-----------------------------------------------------------------------------+
+|                                SERVER LAYER                                 |
+|  Express.js (Node.js) on Port 3000                                          |
+|  - /api/trading/overview, /api/trading/setup, /api/trading/smc              |
+|  - /api/trading/sentiment, /api/trading/funding, /api/trading/backtest      |
+|  - /api/trading/calendar, /api/trading/mtf                                  |
+|  - /api/bot/status, /api/bot/logs, /api/bot/simulate-chat                   |
++-----------------------------------------------------------------------------+
+         |                                       |                     |
++-------------------+                   +------------------+   +--------------+
+|  QUANT TRADING    |                   | TELEGRAM BOT     |   | GEMINI AI    |
+|  ENGINE           |                   | SERVICE          |   | ASSISTANT    |
+|  (tradingEngine)  |                   | (telegramBot.ts) |   | (gemini.ts)  |
+|  - SMC Detection  |                   | - Long Polling   |   | - Synthesis  |
+|  - MTF Matrix     |                   | - Inline Buttons |   | - Trade R:R  |
+|  - Backtesting    |                   | - 24/7 Alerts    |   | - Contextual |
+|  - EMA/RSI/MACD   |                   | - Webhook Supp.  |   |   Reasoning  |
++-------------------+                   +------------------+   +--------------+
+</pre>
+
+<h2>3. Telegram Bot Interactive Command Catalog</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Feature</th>
+      <th>Technical Functionality</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>/start</code></td>
+      <td>Bot Main Menu</td>
+      <td>Opens the rich menu with interactive inline keyboard buttons.</td>
+    </tr>
+    <tr>
+      <td><code>/gold</code> or <code>/xauusd</code></td>
+      <td>Instant Gold Signal</td>
+      <td>Generates a 1H institutional setup for Gold (XAU/USD) with Entry, Stop-Loss, TP1, TP2, TP3.</td>
+    </tr>
+    <tr>
+      <td><code>/setup &lt;SYM&gt; [TF]</code></td>
+      <td>Custom Signal</td>
+      <td>Generates setup for BTC, ETH, SOL, etc. across 15m, 1h, 4h, or 1d timeframes.</td>
+    </tr>
+    <tr>
+      <td><code>/smc &lt;SYM&gt;</code></td>
+      <td>Smart Money Concepts</td>
+      <td>Reports Order Blocks (OB), Fair Value Gaps (FVG), and Liquidity Sweeps.</td>
+    </tr>
+    <tr>
+      <td><code>/mtf &lt;SYM&gt;</code></td>
+      <td>Multi-TF Confluence</td>
+      <td>Analyzes alignment across 15m, 1h, 4h, and 1D timeframes.</td>
+    </tr>
+    <tr>
+      <td><code>/sentiment</code></td>
+      <td>Fear & Greed Index</td>
+      <td>Real-time score (0–100), 7-day trend, and contrarian institutional guidance.</td>
+    </tr>
+    <tr>
+      <td><code>/funding</code></td>
+      <td>Futures Funding Rates</td>
+      <td>8h funding rates, predicted rates, and Long/Short squeeze risk.</td>
+    </tr>
+    <tr>
+      <td><code>/backtest &lt;SYM&gt;</code></td>
+      <td>Strategy Backtesting</td>
+      <td>Simulates historical win rates, net return %, profit factor, and trade logs.</td>
+    </tr>
+    <tr>
+      <td><code>/calendar</code></td>
+      <td>Macro Events</td>
+      <td>High-impact economic catalysts (FOMC, CPI, NFP, GDP, Central Banks).</td>
+    </tr>
+    <tr>
+      <td><code>/alert &lt;SYM&gt; &lt;PRICE&gt;</code></td>
+      <td>24/7 Price Alert</td>
+      <td>Autonomous background monitor alerts user in chat when price crosses target.</td>
+    </tr>
+    <tr>
+      <td><code>/alerts</code></td>
+      <td>List Active Alerts</td>
+      <td>Lists and manages active price triggers.</td>
+    </tr>
+    <tr>
+      <td><code>/riskcalc &lt;E&gt; &lt;SL&gt; &lt;C&gt;</code></td>
+      <td>Risk Calculator</td>
+      <td>Calculates exact position sizing and dollar risk limit.</td>
+    </tr>
+    <tr>
+      <td><code>/scan</code></td>
+      <td>Market Scanner</td>
+      <td>Scans top crypto and commodity assets for high-confluence opportunities.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>4. Algorithmic Trading Mechanics</h2>
+
+<h3>A. Smart Money Concepts (SMC) Implementation</h3>
+<ul>
+  <li><strong>Fair Value Gaps (FVG):</strong> 3-candle imbalance pattern detection. Bullish FVG exists when <code>Candle[3].low &gt; Candle[1].high</code>. Bearish FVG exists when <code>Candle[3].high &lt; Candle[1].low</code>. Midpoint and mitigation states are tracked.</li>
+  <li><strong>Order Blocks (OB):</strong> Identifies the final opposing candle before a strong displacement expansion (&gt;0.8% price move with high volume).</li>
+  <li><strong>Liquidity Pools:</strong> Clusters swing highs and swing lows into buy-side (resting stop runs) and sell-side liquidity, flagging swept status when prices pierce the level.</li>
+  <li><strong>Market Structure Shift:</strong> Evaluates Break of Structure (BOS) and Change of Character (CHoCH) for structural trend direction.</li>
+</ul>
+
+<h3>B. Multi-Timeframe (MTF) Alignment Matrix</h3>
+<p>Simultaneously fetches 60 historical bars across <strong>15m, 1h, 4h, and 1D</strong> timeframes. Computes EMA(20), EMA(50), RSI(14), and MACD crossover values per timeframe to assign a 0–10 score and generate an overall confluence ratio (e.g. <code>4/4 Strong Buy Alignment</code>).</p>
+
+<h3>C. Risk Management Rules</h3>
+<ul>
+  <li><strong>Risk-to-Reward Ratio:</strong> Strictly enforced between 1:2.0 and 1:3.5.</li>
+  <li><strong>Mathematical Stop-Loss:</strong> Placed beyond key swing points or calculated as <code>1.5 * ATR(14)</code> to avoid normal noise.</li>
+  <li><strong>Tiered Take-Profits:</strong> TP1 (1.2x R:R - move SL to breakeven), TP2 (2.0x R:R - structural target), TP3 (3.0x+ R:R - trend runner).</li>
+</ul>
+
+<h2>5. File & Directory Structure</h2>
+<pre>
+/
+├── server/
+│   ├── geminiService.ts      # Google Gemini 2.5 AI narrative engine
+│   ├── telegramBot.ts        # 24/7 Telegram bot, long polling & price alerts loop
+│   └── tradingEngine.ts      # SMC, MTF, Backtester, Fear&Greed, Funding, Indicators
+├── src/
+│   ├── components/
+│   │   ├── ActivityLogs.tsx       # Live Telegram bot diagnostics stream
+│   │   ├── BotStatusCard.tsx      # Token config & connection status
+│   │   ├── MarketScanner.tsx      # Multi-asset real-time confluence grid
+│   │   ├── MarketTickerBar.tsx    # Live top asset ticker prices
+│   │   ├── Navbar.tsx             # Main tab switcher and live bot badges
+│   │   ├── QuantMacroHub.tsx      # MTF Matrix, Sentiment, Funding, Backtester, Calendar
+│   │   ├── RiskCalculator.tsx     # ATR Position sizing & capital risk calculator
+│   │   ├── TelegramSimulator.tsx  # In-browser interactive Telegram chat tester
+│   │   └── TradeSetupView.tsx     # Candlestick chart & precision trade setup card
+│   ├── App.tsx                    # Main React layout and state manager
+│   ├── main.tsx                   # React root entry
+│   └── types.ts                   # Unified TypeScript interfaces & schemas
+├── server.ts                      # Express API gateway & Vite dev middleware
+├── package.json                   # Dependencies and scripts
+└── metadata.json                  # Application metadata
+</pre>
+
+<h2>6. How to Prompt ChatGPT with this Document</h2>
+<p>Instruct ChatGPT:</p>
+<pre>
+"Here is the technical specification of my Quantitative AI Trading Assistant and Telegram Bot.
+Review this document to understand the codebase structure, trading algorithms (SMC, MTF Matrix, Funding Squeeze),
+API endpoints, and Telegram bot implementation."
+</pre>
+
+</body>
+</html>

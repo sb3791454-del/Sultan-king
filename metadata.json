@@ -1,0 +1,6 @@
+{
+  "name": "AI Trading Assistant Telegram Bot",
+  "description": "Quantitative Live Trading Engine and Gemini AI Assistant connected to Telegram with real-time technical analysis, risk management, and multi-asset market scanning.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
